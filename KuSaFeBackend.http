@@ -1,0 +1,6 @@
+@KuSaFeBackend_HostAddress = http://localhost:5095
+
+GET {{KuSaFeBackend_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
