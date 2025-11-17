@@ -1,4 +1,6 @@
 
+using Microsoft.EntityFrameworkCore;
+
 namespace KuSaFeBackend
 {
     public class Program
@@ -6,6 +8,12 @@ namespace KuSaFeBackend
         public static void Main(string[] args)
         {
             var builder = WebApplication.CreateBuilder(args);
+
+            builder.Services.AddDbContext<AppDbContext>(options =>
+            {
+                var cs = builder.Configuration.GetConnectionString("DefaultConnection");
+                options.UseNpgsql(cs);
+            });
 
             // Add services to the container.
 
