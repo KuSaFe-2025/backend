@@ -13,7 +13,7 @@ public class QuizAttempt
     public DateTime StartedAtUtc { get; set; }
     public DateTime FinishedAtUtc { get; set; }
 
-    public int TotalTimeSeconds { get; set; }
+    public long TotalTimeMs { get; set; }
 
     public int Score { get; set; }
     public int MaxScore { get; set; }

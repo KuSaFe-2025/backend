@@ -13,6 +13,8 @@ public class AppDbContext : DbContext
     public DbSet<AnswerOption> AnswerOptions => Set<AnswerOption>();
     public DbSet<QuizAttempt> QuizAttempts => Set<QuizAttempt>();
     public DbSet<AttemptAnswer> AttemptAnswers => Set<AttemptAnswer>();
+    public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
+
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -20,7 +22,7 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<User>().HasIndex(x => x.Email).IsUnique();
         modelBuilder.Entity<Question>().HasIndex(x => new { x.QuizId, x.Order }).IsUnique();
-        modelBuilder.Entity<QuizAttempt>().HasIndex(a => new { a.QuizId, a.IsPerfect, a.TotalTimeSeconds });
+        modelBuilder.Entity<QuizAttempt>().HasIndex(a => new { a.QuizId, a.IsPerfect, a.TotalTimeMs });
 
         modelBuilder.Entity<Question>()
             .HasOne(q => q.Quiz).WithMany(z => z.Questions)
@@ -47,7 +49,14 @@ public class AppDbContext : DbContext
             .HasForeignKey(x => x.SelectedOptionId).OnDelete(DeleteBehavior.Restrict);
 
         modelBuilder.Entity<Question>()
-            .HasOne<AnswerOption>().WithMany()
-            .HasForeignKey(q => q.CorrectOptionId).OnDelete(DeleteBehavior.Restrict);
+            .Property(q => q.CorrectOptionId)
+            .IsRequired(false);
+
+        modelBuilder.Entity<Question>()
+            .HasOne<AnswerOption>()
+            .WithMany()
+            .HasForeignKey(q => q.CorrectOptionId)
+            .OnDelete(DeleteBehavior.Restrict);
+
     }
 }

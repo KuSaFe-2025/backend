@@ -14,5 +14,6 @@ public class AttemptAnswer
     public AnswerOption SelectedOption { get; set; } = null!;
 
     public bool IsCorrect { get; set; }
-    public int TimeSpentSeconds { get; set; }
+    public int TimeSpentMs { get; set; }
+
 }
