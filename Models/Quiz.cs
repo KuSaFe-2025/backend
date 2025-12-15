@@ -16,4 +16,6 @@ public class Quiz
 
     public ICollection<Question> Questions { get; set; } = new List<Question>();
     public ICollection<QuizAttempt> Attempts { get; set; } = new List<QuizAttempt>();
+
+    public string? ThemeColor { get; set; } // например "#7C3AED"
 }

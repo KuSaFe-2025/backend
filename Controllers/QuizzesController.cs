@@ -11,7 +11,15 @@ public class QuizzesController : ControllerBase
 {
     private readonly AppDbContext _db;
     public QuizzesController(AppDbContext db) => _db = db;
-    public record QuizListItemDto(Guid Id, string Title, string? Description, DescriptionFormat DescriptionFormat, int QuestionsCount);
+    public record QuizListItemDto(
+        Guid Id,
+        string Title,
+        string? Description,
+        DescriptionFormat DescriptionFormat,
+        int QuestionsCount,
+        string? ThemeColor
+    );
+
 
     // Публично: список квизов для главной
     [HttpGet]
@@ -25,7 +33,8 @@ public class QuizzesController : ControllerBase
                 q.Title,
                 q.Description,
                 q.DescriptionFormat,
-                q.Questions.Count
+                q.Questions.Count,
+                q.ThemeColor
             ))
             .ToListAsync();
 
@@ -46,7 +55,8 @@ public class QuizzesController : ControllerBase
                 x.Description,
                 x.DescriptionFormat,
                 x.CreatedAtUtc,
-                QuestionsCount = x.Questions.Count
+                QuestionsCount = x.Questions.Count,
+                x.ThemeColor
             })
             .FirstOrDefaultAsync();
 

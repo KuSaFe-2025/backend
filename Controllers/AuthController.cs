@@ -105,6 +105,53 @@ public class AuthController : ControllerBase
         return Ok(new AuthResponse(user.Id, user.Email, user.DisplayName, accessToken, accessExpSeconds));
     }
 
+    [HttpPost("refresh")]
+    public async Task<IActionResult> Refresh()
+    {
+        var raw = Request.Cookies["refresh_token"];
+        if (string.IsNullOrWhiteSpace(raw))
+            return Unauthorized("No refresh_token cookie.");
+
+        var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
+        var tokenHash = Convert.ToHexString(hashBytes);
+
+        var rt = await _db.RefreshTokens
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.TokenHash == tokenHash);
+
+        if (rt is null)
+            return Unauthorized("Invalid refresh token.");
+
+        if (rt.ExpiresAtUtc <= DateTime.UtcNow)
+            return Unauthorized("Refresh token expired.");
+
+        var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == rt.UserId);
+        if (user is null)
+            return Unauthorized("User not found.");
+
+        // Rotation: refresh-токен одноразовый
+        _db.RefreshTokens.Remove(new RefreshToken { Id = rt.Id });
+
+        var (newRefresh, newHash, newExp) = CreateRefreshToken();
+        _db.RefreshTokens.Add(new RefreshToken
+        {
+            Id = Guid.NewGuid(),
+            UserId = user.Id,
+            TokenHash = newHash,
+            CreatedAtUtc = DateTime.UtcNow,
+            ExpiresAtUtc = newExp,
+            CreatedByIp = HttpContext.Connection.RemoteIpAddress?.ToString(),
+            UserAgent = Request.Headers.UserAgent.ToString()
+        });
+
+        await _db.SaveChangesAsync();
+
+        var (accessToken, accessExpSeconds) = CreateAccessToken(user);
+        SetRefreshCookie(newRefresh, newExp);
+
+        return Ok(new AuthResponse(user.Id, user.Email, user.DisplayName, accessToken, accessExpSeconds));
+    }
+
     private (string jwt, int expiresInSeconds) CreateAccessToken(User user)
     {
         var keyStr = _cfg["Jwt:Key"] ?? throw new InvalidOperationException("Jwt:Key missing");
@@ -155,9 +202,10 @@ public class AuthController : ControllerBase
         Response.Cookies.Append("refresh_token", refreshToken, new CookieOptions
         {
             HttpOnly = true,
-            Secure = true,               // если локально без https — временно поставь false
-            SameSite = SameSiteMode.Strict,
-            Expires = expiresAtUtc
+            Secure = true,
+            SameSite = SameSiteMode.None,
+            Expires = expiresAtUtc,
+            Path = "/"
         });
     }
 

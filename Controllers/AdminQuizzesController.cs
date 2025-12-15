@@ -16,7 +16,7 @@ public class AdminQuizzesController : ControllerBase
     // -------- DTOs --------
     public record OptionDto(Guid Id, string Text);
 
-    public record QuizUpsertRequest(string Title, string? Description, DescriptionFormat DescriptionFormat);
+    public record QuizUpsertRequest(string Title, string? Description, DescriptionFormat DescriptionFormat, string? ThemeColor);
 
     public record QuestionDto(
         Guid Id,
@@ -33,9 +33,11 @@ public class AdminQuizzesController : ControllerBase
         string Title,
         string? Description,
         DescriptionFormat DescriptionFormat,
+        string? ThemeColor,
         DateTime CreatedAtUtc,
         List<QuestionDto> Questions
     );
+
 
     public record CreateQuestionRequest(
         int Order,
@@ -63,13 +65,15 @@ public class AdminQuizzesController : ControllerBase
         if (string.IsNullOrWhiteSpace(title)) return BadRequest("Title is required.");
         if (title.Length > 200) return BadRequest("Title too long (max 200).");
 
+        var themeColor = NormalizeHexColor(req.ThemeColor) ?? "#7C3AED";
         var quiz = new Quiz
         {
             Id = Guid.NewGuid(),
             Title = title,
             Description = req.Description,
             DescriptionFormat = req.DescriptionFormat,
-            CreatedAtUtc = DateTime.UtcNow
+            CreatedAtUtc = DateTime.UtcNow,
+            ThemeColor = themeColor,
         };
 
         _db.Quizzes.Add(quiz);
@@ -89,6 +93,7 @@ public class AdminQuizzesController : ControllerBase
         if (string.IsNullOrWhiteSpace(title)) return BadRequest("Title is required.");
         if (title.Length > 200) return BadRequest("Title too long (max 200).");
 
+        quiz.ThemeColor = NormalizeHexColor(req.ThemeColor) ?? quiz.ThemeColor ?? "#7C3AED";
         quiz.Title = title;
         quiz.Description = req.Description;
         quiz.DescriptionFormat = req.DescriptionFormat;
@@ -121,6 +126,7 @@ public class AdminQuizzesController : ControllerBase
                 q.Title,
                 q.Description,
                 q.DescriptionFormat,
+                q.ThemeColor,
                 q.CreatedAtUtc,
                 q.Questions
                     .OrderBy(x => x.Order)
@@ -300,4 +306,29 @@ public class AdminQuizzesController : ControllerBase
             options[i] = options[i].Trim();
         }
     }
+
+    private static string? NormalizeHexColor(string? input)
+    {
+        if (string.IsNullOrWhiteSpace(input)) return null;
+
+        var s = input.Trim();
+        if (!s.StartsWith("#")) s = "#" + s;
+
+        // поддержим только #RRGGBB
+        if (s.Length != 7) return null;
+
+        for (int i = 1; i < 7; i++)
+        {
+            var c = s[i];
+            var isHex =
+                (c >= '0' && c <= '9') ||
+                (c >= 'a' && c <= 'f') ||
+                (c >= 'A' && c <= 'F');
+
+            if (!isHex) return null;
+        }
+
+        return s.ToUpperInvariant();
+    }
+
 }
