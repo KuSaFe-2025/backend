@@ -58,5 +58,8 @@ public class AppDbContext : DbContext
             .HasForeignKey(q => q.CorrectOptionId)
             .OnDelete(DeleteBehavior.Restrict);
 
+        modelBuilder.Entity<AnswerOption>()
+            .Property(o => o.IsActive)
+            .HasDefaultValue(true);
     }
 }

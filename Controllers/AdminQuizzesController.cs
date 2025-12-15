@@ -14,7 +14,7 @@ public class AdminQuizzesController : ControllerBase
     public AdminQuizzesController(AppDbContext db) => _db = db;
 
     // -------- DTOs --------
-    public record OptionDto(Guid Id, string Text);
+    public record OptionDto(Guid Id, string Text, bool IsActive);
 
     public record QuizUpsertRequest(string Title, string? Description, DescriptionFormat DescriptionFormat, string? ThemeColor);
 
@@ -138,8 +138,9 @@ public class AdminQuizzesController : ControllerBase
                         x.TimeLimitMs,
                         x.CorrectOptionId,
                         x.Options
+                            .Where(o => o.IsActive)
                             .OrderBy(o => o.Id)
-                            .Select(o => new OptionDto(o.Id, o.Text))
+                            .Select(o => new OptionDto(o.Id, o.Text, o.IsActive))
                             .ToList()
                     ))
                     .ToList()
@@ -164,9 +165,11 @@ public class AdminQuizzesController : ControllerBase
             {
                 Id = Guid.NewGuid(),
                 QuestionId = questionId,
-                Text = text
+                Text = text.Trim(),
+                IsActive = true
             })
             .ToList();
+
 
         var correctId = optionEntities[req.CorrectOptionIndex].Id;
 
@@ -199,7 +202,6 @@ public class AdminQuizzesController : ControllerBase
         return CreatedAtAction(nameof(GetQuizWithQuestions), new { quizId }, new { question.Id });
     }
 
-    // -------- Update question (replaces options) --------
     [HttpPut("{quizId:guid}/questions/{questionId:guid}")]
     public async Task<IActionResult> UpdateQuestion(Guid quizId, Guid questionId, [FromBody] UpdateQuestionRequest req)
     {
@@ -209,72 +211,67 @@ public class AdminQuizzesController : ControllerBase
 
         if (question is null) return NotFound();
 
-        ValidateQuestionInput(req.Text, req.Points, req.TimeLimitMs, req.Options, req.CorrectOptionIndex);
+        try
+        {
+            ValidateQuestionInput(req.Text, req.Points, req.TimeLimitMs, req.Options, req.CorrectOptionIndex);
+        }
+        catch (ArgumentException e)
+        {
+            return BadRequest(e.Message);
+        }
 
-        // 1) обновляем поля вопроса (пока без correct)
+        // обновляем поля вопроса
         question.Order = req.Order;
         question.Text = req.Text.Trim();
         question.Points = req.Points;
         question.TimeLimitMs = req.TimeLimitMs;
 
-        // 2) отцепляем CorrectOptionId (иначе FK помешает удалить старые опции)
-        question.CorrectOptionId = null;
+        // стабильно сопоставляем "по индексу" (как ты и задумал)
+        var existing = question.Options.OrderBy(o => o.Id).ToList();
 
-        try
+        // 1) обновить/активировать первые N опций
+        for (int i = 0; i < req.Options.Count; i++)
         {
-            await _db.SaveChangesAsync(); // фиксируем обновление вопроса + NULL correct
-        }
-        catch (DbUpdateException e)
-        {
-            return BadRequest("Failed to update question (maybe duplicate order?). " + e.Message);
-        }
+            var text = req.Options[i].Trim();
 
-        // 3) удаляем старые опции
-        _db.AnswerOptions.RemoveRange(question.Options);
-
-        try
-        {
-            await _db.SaveChangesAsync(); // фиксируем удаление
-        }
-        catch (DbUpdateException e)
-        {
-            return BadRequest("Failed to delete old options. " + e.Message);
-        }
-
-        // 4) создаём и сохраняем новые опции
-        var newOptions = req.Options
-            .Select(text => new AnswerOption
+            if (i < existing.Count)
             {
-                Id = Guid.NewGuid(),
-                QuestionId = question.Id,
-                Text = text.Trim()
-            })
+                existing[i].Text = text;
+                existing[i].IsActive = true;
+            }
+            else
+            {
+                question.Options.Add(new AnswerOption
+                {
+                    Id = Guid.NewGuid(),
+                    QuestionId = question.Id,
+                    Text = text,
+                    IsActive = true
+                });
+            }
+        }
+
+        // 2) остальные старые опции деактивируем (НЕ удаляем)
+        for (int i = req.Options.Count; i < existing.Count; i++)
+            existing[i].IsActive = false;
+
+        // 3) correct ставим на активную опцию по индексу
+        var activeNow = question.Options
+            .Where(o => o.IsActive)
+            .OrderBy(o => o.Id)
             .ToList();
 
-        _db.AnswerOptions.AddRange(newOptions);
-
-        try
-        {
-            await _db.SaveChangesAsync(); // вставили новые опции
-        }
-        catch (DbUpdateException e)
-        {
-            return BadRequest("Failed to insert new options. " + e.Message);
-        }
-
-        // 5) ставим correct на существующую (уже вставленную) опцию
-        question.CorrectOptionId = newOptions[req.CorrectOptionIndex].Id;
+        question.CorrectOptionId = activeNow[req.CorrectOptionIndex].Id;
 
         try
         {
             await _db.SaveChangesAsync();
+            return NoContent();
         }
         catch (DbUpdateException e)
         {
-            return BadRequest("Failed to set correct option. " + e.Message);
+            return BadRequest("Failed to update question. " + e.Message);
         }
-
-        return NoContent();
     }
 
 

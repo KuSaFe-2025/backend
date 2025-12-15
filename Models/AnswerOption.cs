@@ -11,4 +11,6 @@ public class AnswerOption
 
     [Required]
     public string Text { get; set; } = null!;
+
+    public bool IsActive { get; set; } = true;
 }

@@ -6,6 +6,8 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using System.Security.Cryptography;
+
 
 namespace KuSaFeBackend.Controllers;
 
@@ -34,6 +36,34 @@ public class QuizPlayController : ControllerBase
         Guid? CorrectOptionId,
         List<OptionDto> Options
     );
+
+    private static List<OptionDto> BuildShuffledOptions(Question q)
+    {
+        var list = q.Options
+            .Where(o => o.IsActive)
+            .Select(o => new OptionDto(o.Id, o.Text))
+            .ToList();
+
+        // Fisher–Yates
+        for (int i = list.Count - 1; i > 0; i--)
+        {
+            int j = RandomNumberGenerator.GetInt32(i + 1);
+            (list[i], list[j]) = (list[j], list[i]);
+        }
+
+        return list;
+    }
+
+    private static PublicQuestionDto ToPublicQuestionDto(Question q) =>
+        new(
+            q.Id,
+            q.Order,
+            q.Text,
+            q.Points,
+            q.TimeLimitMs,
+            q.CorrectOptionId,
+            BuildShuffledOptions(q)
+        );
 
     public record StartResponse(
         Guid AttemptId,
@@ -132,16 +162,6 @@ public class QuizPlayController : ControllerBase
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
-    private static PublicQuestionDto ToPublicQuestionDto(Question q) =>
-        new(
-            q.Id,
-            q.Order,
-            q.Text,
-            q.Points,
-            q.TimeLimitMs,
-            q.CorrectOptionId,
-            q.Options.Select(o => new OptionDto(o.Id, o.Text)).ToList()
-        );
 
     private async Task<AnswerResponse> FinishAttempt(Guid attemptId, string reason)
     {
@@ -283,7 +303,7 @@ public class QuizPlayController : ControllerBase
         if (expected.Id != questionId) return BadRequest("Not the current question.");
 
         // option existence
-        if (!expected.Options.Any(o => o.Id == req.SelectedOptionId))
+        if (!expected.Options.Any(o => o.IsActive && o.Id == req.SelectedOptionId))
             return BadRequest("SelectedOptionId is not in this question.");
 
         // timeSpentMs из токена
