@@ -1,0 +1,190 @@
+{
+  "info": {
+    "_postman_id": "7f9e5f7a-4b1a-4bde-9f3b-9f4d7e2e1111",
+    "name": "KuSaFe API Autotests (Auth + Quiz Play)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:5000" },
+    { "key": "email", "value": "" },
+    { "key": "password", "value": "password123" },
+    { "key": "displayName", "value": "PostmanTester" },
+    { "key": "accessToken", "value": "" },
+    { "key": "quizId", "value": "" },
+    { "key": "attemptId", "value": "" },
+    { "key": "questionToken", "value": "" },
+    { "key": "selectedOptionId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "00 - Init (set random email)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "if (!pm.collectionVariables.get('email') || pm.collectionVariables.get('email').trim() === '') {",
+              "  pm.collectionVariables.set('email', 'postman_' + Date.now() + '@example.com');",
+              "}",
+              "pm.test('Init OK', () => pm.expect(true).to.eql(true));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": { "raw": "{{baseUrl}}/v1/quizzes", "host": ["{{baseUrl}}"], "path": ["v1", "quizzes"] }
+      }
+    },
+    {
+      "name": "01 - Register",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "const json = pm.response.json();",
+              "pm.collectionVariables.set('accessToken', json.accessToken);",
+              "pm.test('Access token exists', () => pm.expect(json.accessToken).to.be.a('string').and.not.empty);",
+              "pm.test('Email normalized', () => pm.expect(json.email).to.eql(pm.collectionVariables.get('email').trim().toLowerCase()));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\",\n  \"displayName\": \"{{displayName}}\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/v1/auth/register",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "auth", "register"]
+        }
+      }
+    },
+    {
+      "name": "02 - Get quizzes (pick first quizId)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "const arr = pm.response.json();",
+              "pm.test('Has quizzes', () => pm.expect(arr.length).to.be.above(0));",
+              "pm.collectionVariables.set('quizId', arr[0].id);",
+              "pm.test('quizId set', () => pm.expect(pm.collectionVariables.get('quizId')).to.match(/^[0-9a-fA-F-]{36}$/));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": { "raw": "{{baseUrl}}/v1/quizzes", "host": ["{{baseUrl}}"], "path": ["v1", "quizzes"] }
+      }
+    },
+    {
+      "name": "03 - Start quiz",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "const json = pm.response.json();",
+              "pm.collectionVariables.set('attemptId', json.attemptId);",
+              "pm.collectionVariables.set('questionToken', json.questionToken);",
+              "pm.collectionVariables.set('selectedOptionId', json.question.correctOptionId);",
+              "pm.test('attemptId set', () => pm.expect(json.attemptId).to.match(/^[0-9a-fA-F-]{36}$/));",
+              "pm.test('questionToken set', () => pm.expect(json.questionToken).to.be.a('string').and.not.empty);",
+              "pm.test('correctOptionId present', () => pm.expect(json.question.correctOptionId).to.match(/^[0-9a-fA-F-]{36}$/));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/v1/quizzes/{{quizId}}/start",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "quizzes", "{{quizId}}", "start"]
+        }
+      }
+    },
+    {
+      "name": "04 - Answer (loop until finished)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "const json = pm.response.json();",
+              "",
+              "if (json.finished) {",
+              "  pm.test('Finished reason present', () => pm.expect(json.reason).to.be.a('string'));",
+              "  pm.collectionVariables.set('finalScore', json.score);",
+              "  pm.collectionVariables.set('finalMaxScore', json.maxScore);",
+              "  postman.setNextRequest('05 - Leaderboard');",
+              "} else {",
+              "  pm.test('Has nextQuestionToken', () => pm.expect(json.nextQuestionToken).to.be.a('string').and.not.empty);",
+              "  pm.test('Has nextQuestion', () => pm.expect(json.nextQuestion).to.be.an('object'));",
+              "  pm.collectionVariables.set('questionToken', json.nextQuestionToken);",
+              "  pm.collectionVariables.set('selectedOptionId', json.nextQuestion.correctOptionId);",
+              "  postman.setNextRequest('04 - Answer (loop until finished)');",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"attemptId\": \"{{attemptId}}\",\n  \"questionToken\": \"{{questionToken}}\",\n  \"selectedOptionId\": \"{{selectedOptionId}}\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/v1/quizzes/{{quizId}}/answer",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "quizzes", "{{quizId}}", "answer"]
+        }
+      }
+    },
+    {
+      "name": "05 - Leaderboard",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "const arr = pm.response.json();",
+              "pm.test('Is array', () => pm.expect(Array.isArray(arr)).to.eql(true));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/v1/quizzes/{{quizId}}/leaderboard?limit=10",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "quizzes", "{{quizId}}", "leaderboard"],
+          "query": [{ "key": "limit", "value": "10" }]
+        }
+      }
+    }
+  ]
+}
