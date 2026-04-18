@@ -6,11 +6,12 @@ public class AnswerOption
 {
     public Guid Id { get; set; }
 
-    public Guid QuestionId { get; set; }
-    public Question Question { get; set; } = null!;
+    public Guid GameTaskId { get; set; }
+    public GameTask GameTask { get; set; } = null!;
 
     [Required]
     public string Text { get; set; } = null!;
 
+    public int SortOrder { get; set; }
     public bool IsActive { get; set; } = true;
 }

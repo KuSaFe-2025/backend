@@ -20,6 +20,7 @@ public class User
 
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
 
-    public ICollection<QuizAttempt> Attempts { get; set; } = new List<QuizAttempt>();
+    public ICollection<Game> Games { get; set; } = new List<Game>();
+    public ICollection<GameAttempt> Attempts { get; set; } = new List<GameAttempt>();
     public ICollection<RefreshToken> RefreshTokens { get; set; } = new List<RefreshToken>();
 }

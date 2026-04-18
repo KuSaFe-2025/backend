@@ -8,11 +8,11 @@ public class AppDbContext : DbContext
     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
 
     public DbSet<User> Users => Set<User>();
-    public DbSet<Quiz> Quizzes => Set<Quiz>();
-    public DbSet<Question> Questions => Set<Question>();
+    public DbSet<Game> Games => Set<Game>();
+    public DbSet<GameTask> GameTasks => Set<GameTask>();
     public DbSet<AnswerOption> AnswerOptions => Set<AnswerOption>();
-    public DbSet<QuizAttempt> QuizAttempts => Set<QuizAttempt>();
-    public DbSet<AttemptAnswer> AttemptAnswers => Set<AttemptAnswer>();
+    public DbSet<GameAttempt> GameAttempts => Set<GameAttempt>();
+    public DbSet<GameTaskAnswer> GameTaskAnswers => Set<GameTaskAnswer>();
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
 
 
@@ -21,38 +21,42 @@ public class AppDbContext : DbContext
         base.OnModelCreating(modelBuilder);
 
         modelBuilder.Entity<User>().HasIndex(x => x.Email).IsUnique();
-        modelBuilder.Entity<Question>().HasIndex(x => new { x.QuizId, x.Order }).IsUnique();
-        modelBuilder.Entity<QuizAttempt>().HasIndex(a => new { a.QuizId, a.IsPerfect, a.TotalTimeMs });
+        modelBuilder.Entity<GameTask>().HasIndex(x => new { x.GameId, x.Order }).IsUnique();
+        modelBuilder.Entity<GameAttempt>().HasIndex(a => new { a.GameId, a.IsPerfect, a.TotalTimeMs });
 
-        modelBuilder.Entity<Question>()
-            .HasOne(q => q.Quiz).WithMany(z => z.Questions)
-            .HasForeignKey(q => q.QuizId).OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<Game>()
+            .HasOne(g => g.OwnerUser).WithMany(u => u.Games)
+            .HasForeignKey(g => g.OwnerUserId).OnDelete(DeleteBehavior.Cascade);
 
         modelBuilder.Entity<AnswerOption>()
-            .HasOne(o => o.Question).WithMany(q => q.Options)
-            .HasForeignKey(o => o.QuestionId).OnDelete(DeleteBehavior.Cascade);
+            .HasOne(o => o.GameTask).WithMany(q => q.Options)
+            .HasForeignKey(o => o.GameTaskId).OnDelete(DeleteBehavior.Cascade);
 
-        modelBuilder.Entity<QuizAttempt>()
+        modelBuilder.Entity<GameTask>()
+            .HasOne(q => q.Game).WithMany(z => z.Tasks)
+            .HasForeignKey(q => q.GameId).OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<GameAttempt>()
             .HasOne(a => a.User).WithMany(u => u.Attempts)
             .HasForeignKey(a => a.UserId);
 
-        modelBuilder.Entity<QuizAttempt>()
-            .HasOne(a => a.Quiz).WithMany(q => q.Attempts)
-            .HasForeignKey(a => a.QuizId);
+        modelBuilder.Entity<GameAttempt>()
+            .HasOne(a => a.Game).WithMany(q => q.Attempts)
+            .HasForeignKey(a => a.GameId);
 
-        modelBuilder.Entity<AttemptAnswer>()
+        modelBuilder.Entity<GameTaskAnswer>()
             .HasOne(x => x.Attempt).WithMany(a => a.Answers)
             .HasForeignKey(x => x.AttemptId).OnDelete(DeleteBehavior.Cascade);
 
-        modelBuilder.Entity<AttemptAnswer>()
+        modelBuilder.Entity<GameTaskAnswer>()
+            .HasOne(x => x.GameTask).WithMany(t => t.Answers)
+            .HasForeignKey(x => x.GameTaskId).OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<GameTaskAnswer>()
             .HasOne(x => x.SelectedOption).WithMany()
             .HasForeignKey(x => x.SelectedOptionId).OnDelete(DeleteBehavior.Restrict);
 
-        modelBuilder.Entity<Question>()
-            .Property(q => q.CorrectOptionId)
-            .IsRequired(false);
-
-        modelBuilder.Entity<Question>()
+        modelBuilder.Entity<GameTask>()
             .HasOne<AnswerOption>()
             .WithMany()
             .HasForeignKey(q => q.CorrectOptionId)
