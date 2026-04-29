@@ -1,0 +1,410 @@
+using KuSaFeBackend.Contracts;
+using KuSaFeBackend.Models;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using System.Linq.Expressions;
+
+namespace KuSaFeBackend.Controllers;
+
+[ApiController]
+[Authorize]
+[Route("v1/my/games")]
+public class MyGamesController : ControllerBase
+{
+    private readonly AppDbContext _db;
+
+    public MyGamesController(AppDbContext db) => _db = db;
+
+    [HttpGet]
+    public async Task<IActionResult> ListMine()
+    {
+        var userId = User.GetCurrentUserId();
+        if (userId is null) return Unauthorized();
+
+        var items = await _db.Games
+            .AsNoTracking()
+            .Where(g => g.OwnerUserId == userId.Value)
+            .OrderByDescending(g => g.UpdatedAtUtc)
+            .Select(g => new GameListItemDto(
+                g.Id,
+                g.Title,
+                g.Description,
+                g.DescriptionFormat,
+                g.Tasks.Count,
+                g.ThemeColor,
+                g.Status,
+                g.OwnerUser.DisplayName,
+                true
+            ))
+            .ToListAsync();
+
+        return Ok(items);
+    }
+
+    [HttpPost]
+    public async Task<IActionResult> Create([FromBody] GameUpsertRequest req)
+    {
+        var userId = User.GetCurrentUserId();
+        if (userId is null) return Unauthorized();
+
+        var title = (req.Title ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(title)) return BadRequest("Title is required.");
+        if (title.Length > 200) return BadRequest("Title too long (max 200).");
+
+        var game = new Game
+        {
+            Id = Guid.NewGuid(),
+            OwnerUserId = userId.Value,
+            Title = title,
+            Description = req.Description,
+            DescriptionFormat = req.DescriptionFormat,
+            ThemeColor = NormalizeHexColor(req.ThemeColor) ?? "#7C3AED",
+            Status = GameStatus.Unverified,
+            CreatedAtUtc = DateTime.UtcNow,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        _db.Games.Add(game);
+        await _db.SaveChangesAsync();
+
+        return CreatedAtAction(nameof(GetMine), new { gameId = game.Id }, new { game.Id });
+    }
+
+    [HttpGet("{gameId:guid}")]
+    public async Task<IActionResult> GetMine(Guid gameId)
+    {
+        var game = await GetOwnedGameQuery()
+            .Where(g => g.Id == gameId)
+            .Select(ToEditorDto())
+            .FirstOrDefaultAsync();
+
+        return game is null ? NotFound() : Ok(game);
+    }
+
+    [HttpPut("{gameId:guid}")]
+    public async Task<IActionResult> Update(Guid gameId, [FromBody] GameUpsertRequest req)
+    {
+        var game = await GetOwnedGameQuery().FirstOrDefaultAsync(g => g.Id == gameId);
+        if (game is null) return NotFound();
+
+        var title = (req.Title ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(title)) return BadRequest("Title is required.");
+        if (title.Length > 200) return BadRequest("Title too long (max 200).");
+
+        game.Title = title;
+        game.Description = req.Description;
+        game.DescriptionFormat = req.DescriptionFormat;
+        game.ThemeColor = NormalizeHexColor(req.ThemeColor) ?? game.ThemeColor ?? "#7C3AED";
+        TouchForContentChange(game);
+
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    [HttpDelete("{gameId:guid}")]
+    public async Task<IActionResult> Delete(Guid gameId)
+    {
+        var game = await GetOwnedGameQuery().FirstOrDefaultAsync(g => g.Id == gameId);
+        if (game is null) return NotFound();
+
+        _db.Games.Remove(game);
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    [HttpPost("{gameId:guid}/submit-for-verification")]
+    public async Task<IActionResult> SubmitForVerification(Guid gameId)
+    {
+        var game = await GetOwnedGameQuery()
+            .Include(g => g.Tasks)
+            .FirstOrDefaultAsync(g => g.Id == gameId);
+
+        if (game is null) return NotFound();
+        if (!game.Tasks.Any()) return BadRequest("Game must contain at least one task.");
+
+        game.UpdatedAtUtc = DateTime.UtcNow;
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    [HttpGet("{gameId:guid}/stats")]
+    public async Task<IActionResult> GetStats(Guid gameId)
+    {
+        var game = await GetOwnedGameQuery()
+            .Include(g => g.Tasks).ThenInclude(t => t.Options)
+            .Include(g => g.Attempts).ThenInclude(a => a.Answers)
+            .FirstOrDefaultAsync(g => g.Id == gameId);
+
+        if (game is null) return NotFound();
+        return Ok(BuildStatsDto(game));
+    }
+
+    [HttpPost("{gameId:guid}/tasks")]
+    public async Task<IActionResult> CreateTask(Guid gameId, [FromBody] GameTaskUpsertRequest req)
+    {
+        var game = await GetOwnedGameQuery().FirstOrDefaultAsync(g => g.Id == gameId);
+        if (game is null) return NotFound();
+
+        try
+        {
+            var task = BuildTask(req, gameId);
+            _db.GameTasks.Add(task);
+            TouchForContentChange(game);
+
+            await _db.SaveChangesAsync();
+            return CreatedAtAction(nameof(GetMine), new { gameId }, new { task.Id });
+        }
+        catch (ArgumentException e)
+        {
+            return BadRequest(e.Message);
+        }
+    }
+
+    [HttpPut("{gameId:guid}/tasks/{taskId:guid}")]
+    public async Task<IActionResult> UpdateTask(Guid gameId, Guid taskId, [FromBody] GameTaskUpsertRequest req)
+    {
+        var game = await GetOwnedGameQuery().FirstOrDefaultAsync(g => g.Id == gameId);
+        if (game is null) return NotFound();
+
+        var task = await _db.GameTasks
+            .Include(t => t.Options)
+            .FirstOrDefaultAsync(t => t.Id == taskId && t.GameId == gameId);
+
+        if (task is null) return NotFound();
+
+        try
+        {
+            ApplyTaskUpdate(task, req);
+            TouchForContentChange(game);
+
+            await _db.SaveChangesAsync();
+            return NoContent();
+        }
+        catch (ArgumentException e)
+        {
+            return BadRequest(e.Message);
+        }
+    }
+
+    [HttpDelete("{gameId:guid}/tasks/{taskId:guid}")]
+    public async Task<IActionResult> DeleteTask(Guid gameId, Guid taskId)
+    {
+        var game = await GetOwnedGameQuery().FirstOrDefaultAsync(g => g.Id == gameId);
+        if (game is null) return NotFound();
+
+        var task = await _db.GameTasks.FirstOrDefaultAsync(t => t.Id == taskId && t.GameId == gameId);
+        if (task is null) return NotFound();
+
+        _db.GameTasks.Remove(task);
+        TouchForContentChange(game);
+
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    internal IQueryable<Game> GetOwnedGameQuery()
+    {
+        var userId = User.GetCurrentUserId();
+        return _db.Games.Where(g => userId.HasValue && g.OwnerUserId == userId.Value);
+    }
+
+    internal static Expression<Func<Game, GameEditorDto>> ToEditorDto() =>
+        g => new GameEditorDto(
+            g.Id,
+            g.Title,
+            g.Description,
+            g.DescriptionFormat,
+            g.ThemeColor,
+            g.Status,
+            g.OwnerUserId,
+            g.OwnerUser.DisplayName,
+            g.CreatedAtUtc,
+            g.UpdatedAtUtc,
+            g.Tasks
+                .OrderBy(t => t.Order)
+                .Select(t => new GameTaskEditorDto(
+                    t.Id,
+                    t.Type,
+                    t.Order,
+                    t.Text,
+                    t.Points,
+                    t.TimeLimitMs,
+                    t.CorrectOptionId,
+                    t.Options
+                        .OrderBy(o => o.SortOrder)
+                        .Select(o => new EditorOptionDto(o.Id, o.Text, o.IsActive, o.SortOrder))
+                        .ToList()
+                ))
+                .ToList()
+        );
+
+    internal static OwnerGameStatsDto BuildStatsDto(Game game)
+    {
+        var attempts = game.Attempts.ToList();
+        var tasks = game.Tasks.OrderBy(t => t.Order).ToList();
+
+        return new OwnerGameStatsDto(
+            game.Id,
+            attempts.Count,
+            attempts.Count == 0 ? 0 : attempts.Average(a => a.Score),
+            attempts.Count == 0 ? 0 : attempts.Average(a => a.TotalTimeMs),
+            attempts.Count == 0 ? 0 : attempts.Count(a => a.IsPerfect) / (double)attempts.Count,
+            tasks.Select(t =>
+            {
+                var answers = attempts.SelectMany(a => a.Answers).Where(a => a.GameTaskId == t.Id).ToList();
+                return new OwnerGameStatsTaskItemDto(
+                    t.Id,
+                    t.Text,
+                    t.Type,
+                    attempts.Count,
+                    answers.Count(a => a.IsCorrect == true),
+                    answers.Count,
+                    answers
+                        .Where(a => !string.IsNullOrWhiteSpace(a.TextAnswer))
+                        .OrderByDescending(a => a.Id)
+                        .Take(5)
+                        .Select(a => a.TextAnswer!)
+                        .ToList(),
+                    t.Type != GameTaskType.Poll
+                        ? new List<PollOptionStatsDto>()
+                        : t.Options
+                            .Where(o => o.IsActive)
+                            .OrderBy(o => o.SortOrder)
+                            .Select(o => new PollOptionStatsDto(o.Id, o.Text, answers.Count(a => a.SelectedOptionId == o.Id)))
+                            .ToList()
+                );
+            }).ToList()
+        );
+    }
+
+    internal static void TouchForContentChange(Game game)
+    {
+        game.UpdatedAtUtc = DateTime.UtcNow;
+        if (game.Status == GameStatus.Verified)
+            game.Status = GameStatus.Unverified;
+    }
+
+    internal static GameTask BuildTask(GameTaskUpsertRequest req, Guid gameId)
+    {
+        var task = new GameTask
+        {
+            Id = Guid.NewGuid(),
+            GameId = gameId
+        };
+
+        ApplyTaskUpdate(task, req);
+        return task;
+    }
+
+    internal static void ApplyTaskUpdate(GameTask task, GameTaskUpsertRequest req)
+    {
+        var text = (req.Text ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(text)) throw new ArgumentException("Task text is required.");
+        if (req.Points < 0) throw new ArgumentException("Points must be >= 0.");
+        if (req.TimeLimitMs <= 0) throw new ArgumentException("TimeLimitMs must be > 0.");
+
+        var options = (req.Options ?? new List<string>())
+            .Select(o => (o ?? string.Empty).Trim())
+            .Where(o => !string.IsNullOrWhiteSpace(o))
+            .ToList();
+
+        task.Type = req.Type;
+        task.Order = req.Order;
+        task.Text = text;
+        task.Points = req.Type is GameTaskType.OpenEnded or GameTaskType.Poll ? 0 : req.Points;
+        task.TimeLimitMs = req.TimeLimitMs;
+        task.OpenEndedAcceptedAnswer = null;
+        task.UpdatedAtUtc = DateTime.UtcNow;
+        if (task.CreatedAtUtc == default) task.CreatedAtUtc = DateTime.UtcNow;
+
+        switch (req.Type)
+        {
+            case GameTaskType.Quiz:
+                if (options.Count < 2) throw new ArgumentException("Quiz requires at least 2 options.");
+                if (!req.CorrectOptionIndex.HasValue || req.CorrectOptionIndex < 0 || req.CorrectOptionIndex >= options.Count)
+                    throw new ArgumentException("CorrectOptionIndex is out of range.");
+                SyncOptions(task, options);
+                task.CorrectOptionId = task.Options.OrderBy(o => o.SortOrder).ElementAt(req.CorrectOptionIndex.Value).Id;
+                break;
+            case GameTaskType.TrueFalse:
+                SyncOptions(task, new List<string> { "Правда", "Ложь" });
+                var tfIndex = req.CorrectOptionIndex ?? 0;
+                if (tfIndex is < 0 or > 1) throw new ArgumentException("CorrectOptionIndex must be 0 or 1 for TrueFalse.");
+                task.CorrectOptionId = task.Options.OrderBy(o => o.SortOrder).ElementAt(tfIndex).Id;
+                break;
+            case GameTaskType.Puzzle:
+                if (options.Count < 2) throw new ArgumentException("Puzzle requires at least 2 items.");
+                SyncOptions(task, options);
+                task.CorrectOptionId = null;
+                break;
+            case GameTaskType.OpenEnded:
+                task.CorrectOptionId = null;
+                DeactivateAllOptions(task);
+                break;
+            case GameTaskType.Poll:
+                if (options.Count < 2) throw new ArgumentException("Poll requires at least 2 options.");
+                SyncOptions(task, options);
+                task.CorrectOptionId = null;
+                break;
+            default:
+                throw new ArgumentOutOfRangeException();
+        }
+    }
+
+    private static void SyncOptions(GameTask task, List<string> texts)
+    {
+        var existing = task.Options.OrderBy(o => o.SortOrder).ToList();
+
+        for (var i = 0; i < texts.Count; i++)
+        {
+            if (i < existing.Count)
+            {
+                existing[i].Text = texts[i];
+                existing[i].SortOrder = i;
+                existing[i].IsActive = true;
+            }
+            else
+            {
+                task.Options.Add(new AnswerOption
+                {
+                    Id = Guid.NewGuid(),
+                    GameTaskId = task.Id,
+                    Text = texts[i],
+                    SortOrder = i,
+                    IsActive = true
+                });
+            }
+        }
+
+        for (var i = texts.Count; i < existing.Count; i++)
+        {
+            existing[i].IsActive = false;
+            existing[i].SortOrder = i;
+        }
+    }
+
+    private static void DeactivateAllOptions(GameTask task)
+    {
+        foreach (var option in task.Options)
+            option.IsActive = false;
+    }
+
+    internal static string? NormalizeHexColor(string? input)
+    {
+        if (string.IsNullOrWhiteSpace(input)) return null;
+
+        var s = input.Trim();
+        if (!s.StartsWith("#")) s = "#" + s;
+        if (s.Length != 7) return null;
+
+        for (var i = 1; i < 7; i++)
+        {
+            var c = s[i];
+            var isHex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (!isHex) return null;
+        }
+
+        return s.ToUpperInvariant();
+    }
+}
