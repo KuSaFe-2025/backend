@@ -24,4 +24,9 @@
     <PackageReference Include="xunit" Version="2.9.3" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Remove="Tests\**\*.cs" />
+    <None Include="Tests\**\*" Exclude="Tests\**\*.cs" />
+  </ItemGroup>
+
 </Project>
