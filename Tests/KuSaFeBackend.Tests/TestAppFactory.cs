@@ -6,6 +6,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.EntityFrameworkCore.Sqlite;
+using Microsoft.Extensions.Configuration;
 
 namespace KuSaFeBackend.Tests;
 
@@ -55,7 +56,7 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>, IAsyncDispo
         await db.SaveChangesAsync();
     }
 
-    public async ValueTask DisposeAsync()
+    public new async ValueTask DisposeAsync()
     {
         await _connection.DisposeAsync();
         Dispose();
