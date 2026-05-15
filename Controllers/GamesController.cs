@@ -111,7 +111,7 @@ public class GamesController : ControllerBase
     }
 
     [HttpGet("{gameId:guid}/attempts")]
-    public async Task<IActionResult> Attempts(Guid gameId, [FromQuery] int skip = 0, [FromQuery] int take = 10, [FromQuery] string sort = "date_desc")
+    public async Task<IActionResult> Attempts(Guid gameId, [FromQuery] int skip = 0, [FromQuery] int take = 10, [FromQuery] string sort = "date_desc", [FromQuery] bool completedOnly = false)
     {
         var access = await GetPublicGameAccess(gameId);
         if (!access.Exists) return NotFound();
@@ -122,8 +122,15 @@ public class GamesController : ControllerBase
 
         var query = _db.GameAttempts
             .AsNoTracking()
+            .Include(a => a.Answers)
             .Include(a => a.User)
             .Where(a => a.GameId == gameId);
+
+        if (completedOnly)
+        {
+            var tasksCount = await _db.GameTasks.CountAsync(t => t.GameId == gameId);
+            query = query.Where(a => a.Answers.Count == tasksCount);
+        }
 
         query = sort switch
         {

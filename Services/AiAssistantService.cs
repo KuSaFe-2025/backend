@@ -45,6 +45,7 @@ public class OllamaAiAssistantService : IAiAssistantService
             .AppendLine("Ты придумываешь вариант ответа для образовательной игры KuSaFe.")
             .AppendLine("Верни JSON строго вида {\"text\":\"...\"}. Никаких пояснений.")
             .AppendLine("Пиши на русском языке. Не повторяй существующие варианты.")
+            .AppendLine("Важно: предложи именно НЕПРАВИЛЬНЫЙ, но правдоподобный вариант ответа. Не возвращай правильный ответ.")
             .AppendLine($"Название игры: {request.Game.Title}")
             .AppendLine($"Описание игры: {request.Game.Description}")
             .AppendLine($"Текст задачи: {request.Task.Text}")
@@ -65,6 +66,7 @@ public class OllamaAiAssistantService : IAiAssistantService
             .AppendLine("Ты придумываешь новую задачу для образовательной игры KuSaFe.")
             .AppendLine("Верни JSON строго вида {\"type\":0,\"text\":\"...\",\"points\":100,\"timeLimitMs\":60000,\"options\":[\"...\",\"...\"],\"correctOptionIndexes\":[0]}.")
             .AppendLine("type: 0 викторина, 1 верно/неверно, 2 порядок, 3 открытый ответ, 4 опрос, 5 множественный выбор.")
+            .AppendLine("Если вопрос ожидает один правильный вариант ответа, используй type 0 (викторина), а не type 5. Используй type 5 только когда нужно выбрать несколько правильных вариантов одновременно.")
             .AppendLine("Пиши на русском языке. Никаких пояснений вне JSON.")
             .AppendLine($"Название игры: {request.Game.Title}")
             .AppendLine($"Описание игры: {request.Game.Description}")
@@ -160,7 +162,7 @@ public class DeterministicAiAssistantService : IAiAssistantService
     public Task<AiSuggestOptionResponse> SuggestOptionAsync(AiSuggestOptionRequest request, CancellationToken cancellationToken)
     {
         var count = (request.Task.Options ?? new List<string>()).Count + 1;
-        return Task.FromResult(new AiSuggestOptionResponse($"Новый вариант {count}"));
+        return Task.FromResult(new AiSuggestOptionResponse($"Неправильный вариант {count}"));
     }
 
     public Task<AiSuggestTaskResponse> SuggestTaskAsync(AiSuggestTaskRequest request, CancellationToken cancellationToken)

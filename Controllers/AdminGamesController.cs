@@ -149,8 +149,22 @@ public class AdminGamesController : ControllerBase
         var task = await _db.GameTasks.FirstOrDefaultAsync(t => t.Id == taskId && t.GameId == gameId);
         if (task is null) return NotFound();
 
+        var attemptIds = await _db.GameTaskAnswers
+            .Where(a => a.GameTaskId == taskId && a.Attempt.GameId == gameId)
+            .Select(a => a.AttemptId)
+            .Distinct()
+            .ToListAsync();
+
+        var answers = await _db.GameTaskAnswers
+            .Where(a => a.GameTaskId == taskId && a.Attempt.GameId == gameId)
+            .ToListAsync();
+        _db.GameTaskAnswers.RemoveRange(answers);
+        task.CorrectOptionId = null;
         _db.GameTasks.Remove(task);
         MyGamesController.TouchForContentChange(game);
+        await _db.SaveChangesAsync();
+        await MyGamesController.NormalizeTaskOrdersAsync(_db, gameId);
+        await MyGamesController.RecalculateAttemptsAsync(_db, attemptIds);
         await _db.SaveChangesAsync();
         return NoContent();
     }
