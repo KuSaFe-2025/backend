@@ -16,6 +16,10 @@ public class Game
     public DescriptionFormat DescriptionFormat { get; set; } = DescriptionFormat.Markdown;
     public string? ThemeColor { get; set; }
     public GameStatus Status { get; set; } = GameStatus.Unverified;
+    public DateTime? LastModeratedAtUtc { get; set; }
+    public string? ModerationDecision { get; set; }
+    public int ModerationYesVotes { get; set; }
+    public int ModerationNoVotes { get; set; }
 
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;

@@ -31,6 +31,10 @@ public class GamesController : ControllerBase
                 g.Tasks.Count,
                 g.ThemeColor,
                 g.Status,
+                g.LastModeratedAtUtc,
+                g.ModerationDecision,
+                g.ModerationYesVotes,
+                g.ModerationNoVotes,
                 g.OwnerUser.DisplayName,
                 isAdmin || (userId.HasValue && g.OwnerUserId == userId.Value)
             ))
@@ -64,6 +68,10 @@ public class GamesController : ControllerBase
                 game.CreatedAtUtc,
                 game.ThemeColor,
                 game.Status,
+                game.LastModeratedAtUtc,
+                game.ModerationDecision,
+                game.ModerationYesVotes,
+                game.ModerationNoVotes,
                 game.OwnerUser.DisplayName,
                 game.Tasks.Count,
                 game.Tasks.GroupBy(t => t.Type).Select(x => new TaskTypeCountDto(x.Key, x.Count())).ToList(),

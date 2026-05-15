@@ -7,12 +7,19 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.EntityFrameworkCore.Sqlite;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace KuSaFeBackend.Tests;
 
 public sealed class TestAppFactory : WebApplicationFactory<Program>, IAsyncDisposable
 {
     private readonly SqliteConnection _connection = new("DataSource=:memory:");
+    private readonly Action<IServiceCollection>? _configureTestServices;
+
+    public TestAppFactory(Action<IServiceCollection>? configureTestServices = null)
+    {
+        _configureTestServices = configureTestServices;
+    }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -26,7 +33,10 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>, IAsyncDispo
                 ["Jwt:Issuer"] = "kusafe-tests",
                 ["Jwt:Audience"] = "kusafe-tests",
                 ["Jwt:AccessMinutes"] = "15",
-                ["Jwt:RefreshDays"] = "30"
+                ["Jwt:RefreshDays"] = "30",
+                ["Moderation:OllamaBaseUrl"] = "http://localhost:11434",
+                ["Moderation:Model"] = "llama3.1:8b",
+                ["Moderation:Votes"] = "5"
             });
         });
 
@@ -38,6 +48,7 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>, IAsyncDispo
             if (dbOpt != null) services.Remove(dbOpt);
 
             services.AddDbContext<AppDbContext>(opt => opt.UseSqlite(_connection));
+            _configureTestServices?.Invoke(services);
 
             _connection.Open();
 

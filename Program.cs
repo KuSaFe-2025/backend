@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using Microsoft.OpenApi.Models;
+using KuSaFeBackend.Services;
 
 namespace KuSaFeBackend
 {
@@ -22,6 +23,12 @@ namespace KuSaFeBackend
             // Add services to the container.
 
             builder.Services.AddControllers();
+            builder.Services.AddHttpClient<IGameModerationService, OllamaGameModerationService>(client =>
+            {
+                var baseUrl = builder.Configuration["Moderation:OllamaBaseUrl"] ?? "http://localhost:11434";
+                client.BaseAddress = new Uri(baseUrl);
+                client.Timeout = TimeSpan.FromSeconds(60);
+            });
 
             // Registering AppLifetimeInfo as a singleton service
             builder.Services.AddSingleton<AppLifetimeInfo>();

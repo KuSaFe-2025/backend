@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Linq.Expressions;
+using KuSaFeBackend.Services;
 
 namespace KuSaFeBackend.Controllers;
 
@@ -13,8 +14,13 @@ namespace KuSaFeBackend.Controllers;
 public class MyGamesController : ControllerBase
 {
     private readonly AppDbContext _db;
+    private readonly IGameModerationService _moderation;
 
-    public MyGamesController(AppDbContext db) => _db = db;
+    public MyGamesController(AppDbContext db, IGameModerationService moderation)
+    {
+        _db = db;
+        _moderation = moderation;
+    }
 
     [HttpGet]
     public async Task<IActionResult> ListMine()
@@ -34,6 +40,10 @@ public class MyGamesController : ControllerBase
                 g.Tasks.Count,
                 g.ThemeColor,
                 g.Status,
+                g.LastModeratedAtUtc,
+                g.ModerationDecision,
+                g.ModerationYesVotes,
+                g.ModerationNoVotes,
                 g.OwnerUser.DisplayName,
                 true
             ))
@@ -118,14 +128,33 @@ public class MyGamesController : ControllerBase
     {
         var game = await GetOwnedGameQuery()
             .Include(g => g.Tasks)
+            .ThenInclude(t => t.Options)
             .FirstOrDefaultAsync(g => g.Id == gameId);
 
         if (game is null) return NotFound();
         if (!game.Tasks.Any()) return BadRequest("Game must contain at least one task.");
 
+        game.Status = GameStatus.PendingModeration;
         game.UpdatedAtUtc = DateTime.UtcNow;
         await _db.SaveChangesAsync();
-        return NoContent();
+
+        var result = await _moderation.ModerateAsync(game, HttpContext.RequestAborted);
+        game.Status = result.Approved ? GameStatus.Verified : GameStatus.Rejected;
+        game.LastModeratedAtUtc = DateTime.UtcNow;
+        game.ModerationDecision = result.Decision;
+        game.ModerationYesVotes = result.YesVotes;
+        game.ModerationNoVotes = result.NoVotes;
+        game.UpdatedAtUtc = DateTime.UtcNow;
+
+        await _db.SaveChangesAsync();
+        return Ok(new
+        {
+            game.Status,
+            game.LastModeratedAtUtc,
+            game.ModerationDecision,
+            game.ModerationYesVotes,
+            game.ModerationNoVotes
+        });
     }
 
     [HttpGet("{gameId:guid}/stats")]
@@ -149,10 +178,17 @@ public class MyGamesController : ControllerBase
         try
         {
             var task = BuildTask(req, gameId);
+            var correctOptionId = task.CorrectOptionId;
+            task.CorrectOptionId = null;
             _db.GameTasks.Add(task);
             TouchForContentChange(game);
 
             await _db.SaveChangesAsync();
+            if (correctOptionId.HasValue)
+            {
+                task.CorrectOptionId = correctOptionId;
+                await _db.SaveChangesAsync();
+            }
             return CreatedAtAction(nameof(GetMine), new { gameId }, new { task.Id });
         }
         catch (ArgumentException e)
@@ -217,6 +253,10 @@ public class MyGamesController : ControllerBase
             g.DescriptionFormat,
             g.ThemeColor,
             g.Status,
+            g.LastModeratedAtUtc,
+            g.ModerationDecision,
+            g.ModerationYesVotes,
+            g.ModerationNoVotes,
             g.OwnerUserId,
             g.OwnerUser.DisplayName,
             g.CreatedAtUtc,
@@ -281,8 +321,12 @@ public class MyGamesController : ControllerBase
     internal static void TouchForContentChange(Game game)
     {
         game.UpdatedAtUtc = DateTime.UtcNow;
-        if (game.Status == GameStatus.Verified)
+        if (game.Status is GameStatus.Verified or GameStatus.PendingModeration or GameStatus.Rejected)
             game.Status = GameStatus.Unverified;
+        game.LastModeratedAtUtc = null;
+        game.ModerationDecision = null;
+        game.ModerationYesVotes = 0;
+        game.ModerationNoVotes = 0;
     }
 
     internal static GameTask BuildTask(GameTaskUpsertRequest req, Guid gameId)

@@ -29,6 +29,10 @@ public class AdminGamesController : ControllerBase
                 g.Tasks.Count,
                 g.ThemeColor,
                 g.Status,
+                g.LastModeratedAtUtc,
+                g.ModerationDecision,
+                g.ModerationYesVotes,
+                g.ModerationNoVotes,
                 g.OwnerUser.DisplayName,
                 true
             ))
@@ -89,9 +93,16 @@ public class AdminGamesController : ControllerBase
         try
         {
             var task = MyGamesController.BuildTask(req, gameId);
+            var correctOptionId = task.CorrectOptionId;
+            task.CorrectOptionId = null;
             _db.GameTasks.Add(task);
             MyGamesController.TouchForContentChange(game);
             await _db.SaveChangesAsync();
+            if (correctOptionId.HasValue)
+            {
+                task.CorrectOptionId = correctOptionId;
+                await _db.SaveChangesAsync();
+            }
             return CreatedAtAction(nameof(GetOne), new { gameId }, new { task.Id });
         }
         catch (ArgumentException e)
