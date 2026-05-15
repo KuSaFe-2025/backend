@@ -184,6 +184,21 @@ public class MyGamesController : ControllerBase
         return File(Encoding.UTF8.GetBytes(csv), "text/csv; charset=utf-8", $"game-{game.Id}-results.csv");
     }
 
+    [HttpGet("{gameId:guid}/tasks/{taskId:guid}/open-answers")]
+    public async Task<IActionResult> GetOpenAnswers(Guid gameId, Guid taskId, [FromQuery] int skip = 0, [FromQuery] int take = 5)
+    {
+        var userId = User.GetCurrentUserId();
+        if (userId is null) return Unauthorized();
+
+        var exists = await _db.GameTasks
+            .AsNoTracking()
+            .AnyAsync(t => t.Id == taskId && t.GameId == gameId && t.Game.OwnerUserId == userId.Value);
+
+        if (!exists) return NotFound();
+
+        return Ok(await BuildOpenAnswersPage(_db, gameId, taskId, skip, take));
+    }
+
     [HttpPost("{gameId:guid}/tasks")]
     public async Task<IActionResult> CreateTask(Guid gameId, [FromBody] GameTaskUpsertRequest req)
     {
@@ -192,18 +207,19 @@ public class MyGamesController : ControllerBase
 
         try
         {
+            var requestedOrder = req.Order;
             var task = BuildTask(req, gameId);
             var correctOptionId = task.CorrectOptionId;
             task.CorrectOptionId = null;
+            task.Order = await NextTemporaryTaskOrder(_db, gameId);
             _db.GameTasks.Add(task);
             TouchForContentChange(game);
 
             await _db.SaveChangesAsync();
-            if (correctOptionId.HasValue)
-            {
-                task.CorrectOptionId = correctOptionId;
-                await _db.SaveChangesAsync();
-            }
+
+            if (correctOptionId.HasValue) task.CorrectOptionId = correctOptionId;
+            var tasks = await _db.GameTasks.Where(t => t.GameId == gameId).OrderBy(t => t.Order).ToListAsync();
+            await ReorderTasksAsync(_db, tasks, task.Id, requestedOrder);
             return CreatedAtAction(nameof(GetMine), new { gameId }, new { task.Id });
         }
         catch (ArgumentException e)
@@ -218,18 +234,22 @@ public class MyGamesController : ControllerBase
         var game = await GetOwnedGameQuery().FirstOrDefaultAsync(g => g.Id == gameId);
         if (game is null) return NotFound();
 
-        var task = await _db.GameTasks
+        var tasks = await _db.GameTasks
             .Include(t => t.Options)
-            .FirstOrDefaultAsync(t => t.Id == taskId && t.GameId == gameId);
+            .Where(t => t.GameId == gameId)
+            .OrderBy(t => t.Order)
+            .ToListAsync();
+
+        var task = tasks.FirstOrDefault(t => t.Id == taskId);
 
         if (task is null) return NotFound();
 
         try
         {
-            ApplyTaskUpdate(task, req);
+            ApplyTaskUpdate(task, req, updateOrder: false);
             TouchForContentChange(game);
 
-            await _db.SaveChangesAsync();
+            await ReorderTasksAsync(_db, tasks, task.Id, req.Order);
             return NoContent();
         }
         catch (ArgumentException e)
@@ -258,6 +278,16 @@ public class MyGamesController : ControllerBase
     {
         var userId = User.GetCurrentUserId();
         return _db.Games.Where(g => userId.HasValue && g.OwnerUserId == userId.Value);
+    }
+
+    internal static async Task<int> NextTemporaryTaskOrder(AppDbContext db, Guid gameId)
+    {
+        var maxOrder = await db.GameTasks
+            .Where(t => t.GameId == gameId)
+            .Select(t => (int?)t.Order)
+            .MaxAsync();
+
+        return (maxOrder ?? 0) + 1000;
     }
 
     internal static Expression<Func<Game, GameEditorDto>> ToEditorDto() =>
@@ -340,6 +370,27 @@ public class MyGamesController : ControllerBase
         );
     }
 
+    internal static async Task<OpenAnswersPageDto> BuildOpenAnswersPage(AppDbContext db, Guid gameId, Guid taskId, int skip, int take)
+    {
+        skip = Math.Max(0, skip);
+        take = Math.Clamp(take, 1, 50);
+
+        var query = db.GameTaskAnswers
+            .AsNoTracking()
+            .Where(a => a.GameTaskId == taskId && a.Attempt.GameId == gameId && !string.IsNullOrWhiteSpace(a.TextAnswer))
+            .OrderByDescending(a => a.Attempt.FinishedAtUtc)
+            .ThenByDescending(a => a.Id);
+
+        var total = await query.CountAsync();
+        var items = await query
+            .Skip(skip)
+            .Take(take)
+            .Select(a => new OpenAnswerItemDto(a.TextAnswer!))
+            .ToListAsync();
+
+        return new OpenAnswersPageDto(items, total, skip, take, skip + items.Count < total);
+    }
+
     internal static string BuildResultsCsv(Game game)
     {
         var lines = new List<string>
@@ -415,7 +466,29 @@ public class MyGamesController : ControllerBase
         return task;
     }
 
-    internal static void ApplyTaskUpdate(GameTask task, GameTaskUpsertRequest req)
+    internal static async Task ReorderTasksAsync(AppDbContext db, List<GameTask> tasks, Guid movingTaskId, int requestedOrder)
+    {
+        if (tasks.Count == 0) return;
+
+        var ordered = tasks.OrderBy(t => t.Order).ToList();
+        var moving = ordered.First(t => t.Id == movingTaskId);
+        ordered.Remove(moving);
+
+        var target = Math.Clamp(requestedOrder, 0, ordered.Count);
+        ordered.Insert(target, moving);
+
+        for (var i = 0; i < ordered.Count; i++)
+            ordered[i].Order = -100000 - i;
+
+        await db.SaveChangesAsync();
+
+        for (var i = 0; i < ordered.Count; i++)
+            ordered[i].Order = i;
+
+        await db.SaveChangesAsync();
+    }
+
+    internal static void ApplyTaskUpdate(GameTask task, GameTaskUpsertRequest req, bool updateOrder = true)
     {
         var text = (req.Text ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(text)) throw new ArgumentException("Task text is required.");
@@ -428,7 +501,7 @@ public class MyGamesController : ControllerBase
             .ToList();
 
         task.Type = req.Type;
-        task.Order = req.Order;
+        if (updateOrder) task.Order = req.Order;
         task.Text = text;
         task.Points = req.Type is GameTaskType.OpenEnded or GameTaskType.Poll ? 0 : req.Points;
         task.TimeLimitMs = req.TimeLimitMs;

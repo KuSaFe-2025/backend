@@ -31,20 +31,26 @@ public class OllamaGameModerationService : IGameModerationService
         var prompt = BuildPrompt(game);
         var yes = 0;
         var no = 0;
+        var rejectionReasons = new List<string>();
 
         for (var i = 0; i < votes; i++)
         {
             var response = await AskOllama(model, prompt, cancellationToken);
             if (response.Trim().StartsWith("YES", StringComparison.OrdinalIgnoreCase))
+            {
                 yes++;
+            }
             else
+            {
                 no++;
+                rejectionReasons.Add(ExtractReason(response));
+            }
         }
 
         var approved = yes > no;
         var decision = approved
             ? $"Approved by local AI moderation ({yes}/{votes} YES)."
-            : $"Rejected by local AI moderation ({no}/{votes} NO).";
+            : $"Rejected by local AI moderation ({no}/{votes} NO). Reason: {FirstNonEmptyReason(rejectionReasons)}";
 
         return new GameModerationResult(approved, yes, no, decision);
     }
@@ -61,8 +67,8 @@ public class OllamaGameModerationService : IGameModerationService
     {
         var content = new StringBuilder();
         content.AppendLine("You are moderating a user-created educational game.");
-        content.AppendLine("Return exactly YES if this content is safe for a public educational platform.");
-        content.AppendLine("Return exactly NO if it contains prohibited, hateful, sexual, violent, illegal, or otherwise unsafe content.");
+        content.AppendLine("Return exactly YES: followed by one short sentence if this content is safe for a public educational platform.");
+        content.AppendLine("Return exactly NO: followed by one short sentence if it contains prohibited, hateful, sexual, violent, illegal, or otherwise unsafe content.");
         content.AppendLine();
         content.AppendLine($"Title: {game.Title}");
         content.AppendLine($"Description: {game.Description}");
@@ -81,6 +87,20 @@ public class OllamaGameModerationService : IGameModerationService
     private record OllamaGenerateRequest(string Model, string Prompt, bool Stream);
 
     private record OllamaGenerateResponse([property: JsonPropertyName("response")] string Response);
+
+    private static string ExtractReason(string response)
+    {
+        var trimmed = response.Trim();
+        var colon = trimmed.IndexOf(':');
+        var reason = colon >= 0 ? trimmed[(colon + 1)..].Trim() : trimmed;
+        if (reason.StartsWith("NO", StringComparison.OrdinalIgnoreCase)) reason = reason[2..].Trim();
+        if (string.IsNullOrWhiteSpace(reason)) return "The content did not meet KuSaFe safety rules.";
+        var sentenceEnd = reason.IndexOfAny(new[] { '.', '!', '?' });
+        return sentenceEnd >= 0 ? reason[..(sentenceEnd + 1)].Trim() : reason.Trim();
+    }
+
+    private static string FirstNonEmptyReason(IEnumerable<string> reasons) =>
+        reasons.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r)) ?? "The content did not meet KuSaFe safety rules.";
 }
 
 public class DeterministicGameModerationService : IGameModerationService
@@ -99,7 +119,7 @@ public class DeterministicGameModerationService : IGameModerationService
             || text.Contains("banword", StringComparison.OrdinalIgnoreCase);
 
         return Task.FromResult(rejected
-            ? new GameModerationResult(false, 1, 4, "Rejected by deterministic E2E moderation (4/5 NO).")
+            ? new GameModerationResult(false, 1, 4, "Rejected by deterministic E2E moderation (4/5 NO). Reason: Content contains a blocked word.")
             : new GameModerationResult(true, 4, 1, "Approved by deterministic E2E moderation (4/5 YES)."));
     }
 }

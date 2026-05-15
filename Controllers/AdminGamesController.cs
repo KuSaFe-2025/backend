@@ -92,17 +92,18 @@ public class AdminGamesController : ControllerBase
 
         try
         {
+            var requestedOrder = req.Order;
             var task = MyGamesController.BuildTask(req, gameId);
             var correctOptionId = task.CorrectOptionId;
             task.CorrectOptionId = null;
+            task.Order = await MyGamesController.NextTemporaryTaskOrder(_db, gameId);
             _db.GameTasks.Add(task);
             MyGamesController.TouchForContentChange(game);
             await _db.SaveChangesAsync();
-            if (correctOptionId.HasValue)
-            {
-                task.CorrectOptionId = correctOptionId;
-                await _db.SaveChangesAsync();
-            }
+
+            if (correctOptionId.HasValue) task.CorrectOptionId = correctOptionId;
+            var tasks = await _db.GameTasks.Where(t => t.GameId == gameId).OrderBy(t => t.Order).ToListAsync();
+            await MyGamesController.ReorderTasksAsync(_db, tasks, task.Id, requestedOrder);
             return CreatedAtAction(nameof(GetOne), new { gameId }, new { task.Id });
         }
         catch (ArgumentException e)
@@ -117,14 +118,20 @@ public class AdminGamesController : ControllerBase
         var game = await _db.Games.FirstOrDefaultAsync(g => g.Id == gameId);
         if (game is null) return NotFound();
 
-        var task = await _db.GameTasks.Include(t => t.Options).FirstOrDefaultAsync(t => t.Id == taskId && t.GameId == gameId);
+        var tasks = await _db.GameTasks
+            .Include(t => t.Options)
+            .Where(t => t.GameId == gameId)
+            .OrderBy(t => t.Order)
+            .ToListAsync();
+
+        var task = tasks.FirstOrDefault(t => t.Id == taskId);
         if (task is null) return NotFound();
 
         try
         {
-            MyGamesController.ApplyTaskUpdate(task, req);
+            MyGamesController.ApplyTaskUpdate(task, req, updateOrder: false);
             MyGamesController.TouchForContentChange(game);
-            await _db.SaveChangesAsync();
+            await MyGamesController.ReorderTasksAsync(_db, tasks, task.Id, req.Order);
             return NoContent();
         }
         catch (ArgumentException e)
@@ -183,5 +190,17 @@ public class AdminGamesController : ControllerBase
         return game is null
             ? NotFound()
             : File(System.Text.Encoding.UTF8.GetBytes(MyGamesController.BuildResultsCsv(game)), "text/csv; charset=utf-8", $"game-{game.Id}-results.csv");
+    }
+
+    [HttpGet("{gameId:guid}/tasks/{taskId:guid}/open-answers")]
+    public async Task<IActionResult> GetOpenAnswers(Guid gameId, Guid taskId, [FromQuery] int skip = 0, [FromQuery] int take = 5)
+    {
+        var exists = await _db.GameTasks
+            .AsNoTracking()
+            .AnyAsync(t => t.Id == taskId && t.GameId == gameId);
+
+        return exists
+            ? Ok(await MyGamesController.BuildOpenAnswersPage(_db, gameId, taskId, skip, take))
+            : NotFound();
     }
 }

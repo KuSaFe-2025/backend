@@ -102,6 +102,16 @@ public record OwnerGameStatsTaskItemDto(
 
 public record PollOptionStatsDto(Guid OptionId, string Text, int Votes);
 
+public record OpenAnswerItemDto(string Text);
+
+public record OpenAnswersPageDto(
+    List<OpenAnswerItemDto> Items,
+    int Total,
+    int Skip,
+    int Take,
+    bool HasMore
+);
+
 public record OwnerGameStatsDto(
     Guid GameId,
     int AttemptsCount,

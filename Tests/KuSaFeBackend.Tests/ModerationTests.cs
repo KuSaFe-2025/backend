@@ -82,6 +82,48 @@ public class ModerationTests
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
+    [Fact]
+    public async Task TaskOrder_CreateAndUpdate_ReordersSiblingsWithoutDuplicateOrder()
+    {
+        await using var app = CreateApp(new GameModerationResult(true, 5, 0, "unused"));
+        var (client, _) = await CreateAuthedClient(app, "order@test.com");
+
+        var game = await client.PostAsJsonAsync("/v1/my/games", new
+        {
+            title = "Order game",
+            description = "Tasks can be reordered",
+            descriptionFormat = 1,
+            themeColor = "#7C3AED"
+        }, JsonOpts);
+        game.EnsureSuccessStatusCode();
+        var created = await game.Content.ReadFromJsonAsync<CreatedGame>(JsonOpts);
+
+        var firstId = await CreateQuizTask(client, created!.Id, 0, "First");
+        await CreateQuizTask(client, created.Id, 1, "Second");
+        var insertedId = await CreateQuizTask(client, created.Id, 0, "Inserted");
+
+        var move = await client.PutAsJsonAsync($"/v1/my/games/{created.Id}/tasks/{firstId}", new
+        {
+            type = 0,
+            order = 0,
+            text = "First",
+            points = 100,
+            timeLimitMs = 60000,
+            options = new[] { "A", "B" },
+            correctOptionIndex = 0
+        }, JsonOpts);
+        move.EnsureSuccessStatusCode();
+
+        var loaded = await client.GetAsync($"/v1/my/games/{created.Id}");
+        loaded.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await loaded.Content.ReadAsStringAsync());
+        var tasks = doc.RootElement.GetProperty("tasks").EnumerateArray().ToList();
+
+        Assert.Equal(new[] { "First", "Inserted", "Second" }, tasks.Select(t => t.GetProperty("text").GetString()).ToArray());
+        Assert.Equal(new[] { 0, 1, 2 }, tasks.Select(t => t.GetProperty("order").GetInt32()).ToArray());
+        Assert.Contains(tasks, t => t.GetProperty("id").GetGuid() == insertedId);
+    }
+
     private static TestAppFactory CreateApp(GameModerationResult result) =>
         new(services =>
         {
@@ -138,6 +180,23 @@ public class ModerationTests
         task.EnsureSuccessStatusCode();
 
         return created.Id;
+    }
+
+    private static async Task<Guid> CreateQuizTask(HttpClient client, Guid gameId, int order, string text)
+    {
+        var task = await client.PostAsJsonAsync($"/v1/my/games/{gameId}/tasks", new
+        {
+            type = 0,
+            order,
+            text,
+            points = 100,
+            timeLimitMs = 60000,
+            options = new[] { "A", "B" },
+            correctOptionIndex = 0
+        }, JsonOpts);
+        task.EnsureSuccessStatusCode();
+        var created = await task.Content.ReadFromJsonAsync<CreatedGame>(JsonOpts);
+        return created!.Id;
     }
 
     private record CreatedGame(Guid Id);
