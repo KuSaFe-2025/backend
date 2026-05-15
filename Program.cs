@@ -17,18 +17,29 @@ namespace KuSaFeBackend
             builder.Services.AddDbContext<AppDbContext>(options =>
             {
                 var cs = builder.Configuration.GetConnectionString("DefaultConnection");
-                options.UseNpgsql(cs);
+                var provider = builder.Configuration["Database:Provider"];
+                if (string.Equals(provider, "Sqlite", StringComparison.OrdinalIgnoreCase))
+                    options.UseSqlite(cs);
+                else
+                    options.UseNpgsql(cs);
             });
 
             // Add services to the container.
 
             builder.Services.AddControllers();
-            builder.Services.AddHttpClient<IGameModerationService, OllamaGameModerationService>(client =>
+            if (string.Equals(builder.Configuration["Moderation:Provider"], "Deterministic", StringComparison.OrdinalIgnoreCase))
             {
-                var baseUrl = builder.Configuration["Moderation:OllamaBaseUrl"] ?? "http://localhost:11434";
-                client.BaseAddress = new Uri(baseUrl);
-                client.Timeout = TimeSpan.FromSeconds(60);
-            });
+                builder.Services.AddSingleton<IGameModerationService, DeterministicGameModerationService>();
+            }
+            else
+            {
+                builder.Services.AddHttpClient<IGameModerationService, OllamaGameModerationService>(client =>
+                {
+                    var baseUrl = builder.Configuration["Moderation:OllamaBaseUrl"] ?? "http://localhost:11434";
+                    client.BaseAddress = new Uri(baseUrl);
+                    client.Timeout = TimeSpan.FromSeconds(60);
+                });
+            }
 
             // Registering AppLifetimeInfo as a singleton service
             builder.Services.AddSingleton<AppLifetimeInfo>();

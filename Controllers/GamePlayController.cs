@@ -386,16 +386,15 @@ public class GamePlayController : ControllerBase
     private Task<int> GetMaxScore(Guid gameId) =>
         _db.GameTasks
             .Where(t => t.GameId == gameId && t.Type != GameTaskType.OpenEnded && t.Type != GameTaskType.Poll)
-            .Select(t => t.Points)
-            .DefaultIfEmpty(0)
-            .SumAsync();
+            .SumAsync(t => (int?)t.Points)
+            .ContinueWith(t => t.Result ?? 0);
 
     private Task<int> GetAttemptScore(Guid attemptId) =>
         _db.GameTaskAnswers
             .Where(a => a.AttemptId == attemptId && a.IsCorrect == true)
             .Join(_db.GameTasks, a => a.GameTaskId, t => t.Id, (_, t) => t.Points)
-            .DefaultIfEmpty(0)
-            .SumAsync();
+            .SumAsync(x => (int?)x)
+            .ContinueWith(t => t.Result ?? 0);
 
     private (ClaimsPrincipal principal, JwtSecurityToken jwt) ValidateQuestionTokenNoLifetime(string token)
     {

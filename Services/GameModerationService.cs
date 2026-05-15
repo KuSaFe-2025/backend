@@ -82,3 +82,24 @@ public class OllamaGameModerationService : IGameModerationService
 
     private record OllamaGenerateResponse([property: JsonPropertyName("response")] string Response);
 }
+
+public class DeterministicGameModerationService : IGameModerationService
+{
+    public Task<GameModerationResult> ModerateAsync(Game game, CancellationToken cancellationToken)
+    {
+        var text = string.Join(" ", new[]
+        {
+            game.Title,
+            game.Description ?? "",
+            string.Join(" ", game.Tasks.Select(t => t.Text)),
+            string.Join(" ", game.Tasks.SelectMany(t => t.Options).Select(o => o.Text))
+        });
+
+        var rejected = text.Contains("forbidden", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("banword", StringComparison.OrdinalIgnoreCase);
+
+        return Task.FromResult(rejected
+            ? new GameModerationResult(false, 1, 4, "Rejected by deterministic E2E moderation (4/5 NO).")
+            : new GameModerationResult(true, 4, 1, "Approved by deterministic E2E moderation (4/5 YES)."));
+    }
+}
