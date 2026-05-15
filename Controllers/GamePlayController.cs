@@ -65,7 +65,16 @@ public class GamePlayController : ControllerBase
         PublicGameTaskDto? NextTask
     );
 
-    public record LeaderboardItem(Guid UserId, string DisplayName, long TotalTimeMs, DateTime FinishedAtUtc);
+    public record LeaderboardItem(
+        Guid UserId,
+        string DisplayName,
+        long TotalTimeMs,
+        DateTime FinishedAtUtc,
+        int Score,
+        int MaxScore,
+        int CorrectAnswers,
+        int TotalTasks
+    );
 
     [Authorize]
     [HttpPost("{gameId:guid}/start")]
@@ -221,12 +230,24 @@ public class GamePlayController : ControllerBase
     {
         limit = Math.Clamp(limit, 1, 200);
 
+        var totalTasks = await _db.GameTasks.CountAsync(t => t.GameId == gameId);
         var items = await _db.GameAttempts
             .AsNoTracking()
+            .Include(a => a.User)
+            .Include(a => a.Answers)
             .Where(a => a.GameId == gameId && a.IsPerfect)
             .OrderBy(a => a.TotalTimeMs)
             .ThenBy(a => a.FinishedAtUtc)
-            .Select(a => new LeaderboardItem(a.UserId, a.User.DisplayName, a.TotalTimeMs, a.FinishedAtUtc))
+            .Select(a => new LeaderboardItem(
+                a.UserId,
+                a.User.DisplayName,
+                a.TotalTimeMs,
+                a.FinishedAtUtc,
+                a.Score,
+                a.MaxScore,
+                a.Answers.Count(x => x.IsCorrect == true),
+                totalTasks
+            ))
             .Take(limit)
             .ToListAsync();
 

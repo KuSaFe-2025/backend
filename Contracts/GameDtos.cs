@@ -92,7 +92,10 @@ public record OwnerGameStatsTaskItemDto(
     GameTaskType Type,
     int Attempts,
     int CorrectAnswers,
+    int IncorrectAnswers,
+    int NeutralAnswers,
     int TotalAnswers,
+    double AccuracyRate,
     List<string> RecentOpenAnswers,
     List<PollOptionStatsDto> PollOptions
 );

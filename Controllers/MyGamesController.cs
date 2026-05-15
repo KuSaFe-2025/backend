@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Linq.Expressions;
 using KuSaFeBackend.Services;
+using System.Text;
 
 namespace KuSaFeBackend.Controllers;
 
@@ -169,6 +170,20 @@ public class MyGamesController : ControllerBase
         return Ok(BuildStatsDto(game));
     }
 
+    [HttpGet("{gameId:guid}/stats/export.csv")]
+    public async Task<IActionResult> ExportStatsCsv(Guid gameId)
+    {
+        var game = await GetOwnedGameQuery()
+            .Include(g => g.Tasks).ThenInclude(t => t.Options)
+            .Include(g => g.Attempts).ThenInclude(a => a.User)
+            .Include(g => g.Attempts).ThenInclude(a => a.Answers).ThenInclude(a => a.SelectedOption)
+            .FirstOrDefaultAsync(g => g.Id == gameId);
+
+        if (game is null) return NotFound();
+        var csv = BuildResultsCsv(game);
+        return File(Encoding.UTF8.GetBytes(csv), "text/csv; charset=utf-8", $"game-{game.Id}-results.csv");
+    }
+
     [HttpPost("{gameId:guid}/tasks")]
     public async Task<IActionResult> CreateTask(Guid gameId, [FromBody] GameTaskUpsertRequest req)
     {
@@ -293,13 +308,20 @@ public class MyGamesController : ControllerBase
             tasks.Select(t =>
             {
                 var answers = attempts.SelectMany(a => a.Answers).Where(a => a.GameTaskId == t.Id).ToList();
+                var correctAnswers = answers.Count(a => a.IsCorrect == true);
+                var incorrectAnswers = answers.Count(a => a.IsCorrect == false);
+                var neutralAnswers = answers.Count(a => a.IsCorrect == null);
+                var scoredAnswers = correctAnswers + incorrectAnswers;
                 return new OwnerGameStatsTaskItemDto(
                     t.Id,
                     t.Text,
                     t.Type,
                     attempts.Count,
-                    answers.Count(a => a.IsCorrect == true),
+                    correctAnswers,
+                    incorrectAnswers,
+                    neutralAnswers,
                     answers.Count,
+                    scoredAnswers == 0 ? 0 : correctAnswers / (double)scoredAnswers,
                     answers
                         .Where(a => !string.IsNullOrWhiteSpace(a.TextAnswer))
                         .OrderByDescending(a => a.Id)
@@ -316,6 +338,58 @@ public class MyGamesController : ControllerBase
                 );
             }).ToList()
         );
+    }
+
+    internal static string BuildResultsCsv(Game game)
+    {
+        var lines = new List<string>
+        {
+            string.Join(',', new[]
+            {
+                "attemptId", "userId", "displayName", "startedAtUtc", "finishedAtUtc", "totalTimeMs",
+                "score", "maxScore", "isPerfect", "taskId", "taskType", "taskOrder", "taskText",
+                "selectedOptionId", "selectedOptionText", "textAnswer", "submittedOrder", "isCorrect", "timeSpentMs"
+            })
+        };
+
+        var tasks = game.Tasks.ToDictionary(t => t.Id);
+        foreach (var attempt in game.Attempts.OrderByDescending(a => a.FinishedAtUtc))
+        {
+            foreach (var answer in attempt.Answers.OrderBy(a => tasks.TryGetValue(a.GameTaskId, out var task) ? task.Order : 0))
+            {
+                tasks.TryGetValue(answer.GameTaskId, out var task);
+                lines.Add(string.Join(',', new[]
+                {
+                    Csv(attempt.Id),
+                    Csv(attempt.UserId),
+                    Csv(attempt.User.DisplayName),
+                    Csv(attempt.StartedAtUtc),
+                    Csv(attempt.FinishedAtUtc),
+                    Csv(attempt.TotalTimeMs),
+                    Csv(attempt.Score),
+                    Csv(attempt.MaxScore),
+                    Csv(attempt.IsPerfect),
+                    Csv(answer.GameTaskId),
+                    Csv(task?.Type.ToString() ?? ""),
+                    Csv(task?.Order ?? 0),
+                    Csv(task?.Text ?? ""),
+                    Csv(answer.SelectedOptionId?.ToString() ?? ""),
+                    Csv(answer.SelectedOption?.Text ?? ""),
+                    Csv(answer.TextAnswer ?? ""),
+                    Csv(answer.SubmittedOrder ?? ""),
+                    Csv(answer.IsCorrect?.ToString() ?? ""),
+                    Csv(answer.TimeSpentMs)
+                }));
+            }
+        }
+
+        return string.Join("\r\n", lines) + "\r\n";
+    }
+
+    private static string Csv(object? value)
+    {
+        var s = Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? "";
+        return "\"" + s.Replace("\"", "\"\"") + "\"";
     }
 
     internal static void TouchForContentChange(Game game)

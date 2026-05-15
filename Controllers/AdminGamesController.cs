@@ -170,4 +170,18 @@ public class AdminGamesController : ControllerBase
 
         return game is null ? NotFound() : Ok(MyGamesController.BuildStatsDto(game));
     }
+
+    [HttpGet("{gameId:guid}/stats/export.csv")]
+    public async Task<IActionResult> ExportStatsCsv(Guid gameId)
+    {
+        var game = await _db.Games
+            .Include(g => g.Tasks).ThenInclude(t => t.Options)
+            .Include(g => g.Attempts).ThenInclude(a => a.User)
+            .Include(g => g.Attempts).ThenInclude(a => a.Answers).ThenInclude(a => a.SelectedOption)
+            .FirstOrDefaultAsync(g => g.Id == gameId);
+
+        return game is null
+            ? NotFound()
+            : File(System.Text.Encoding.UTF8.GetBytes(MyGamesController.BuildResultsCsv(game)), "text/csv; charset=utf-8", $"game-{game.Id}-results.csv");
+    }
 }

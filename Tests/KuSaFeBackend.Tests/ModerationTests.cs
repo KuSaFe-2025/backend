@@ -167,12 +167,14 @@ public sealed class TestAuthHandler : AuthenticationHandler<AuthenticationScheme
         if (!Request.Headers.TryGetValue("X-Test-UserId", out var userId))
             return Task.FromResult(AuthenticateResult.Fail("Missing test user id."));
 
+        var isAdmin = Request.Headers.TryGetValue("X-Test-IsAdmin", out var adminHeader)
+            && string.Equals(adminHeader.ToString(), "true", StringComparison.OrdinalIgnoreCase);
         var claims = new[]
         {
             new Claim(ClaimTypes.NameIdentifier, userId.ToString()),
             new Claim("sub", userId.ToString()),
             new Claim("displayName", "Test User"),
-            new Claim("isAdmin", "false")
+            new Claim("isAdmin", isAdmin ? "true" : "false")
         };
         var identity = new ClaimsIdentity(claims, Scheme.Name);
         var principal = new ClaimsPrincipal(identity);
