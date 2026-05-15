@@ -199,11 +199,16 @@ public class AuthController : ControllerBase
 
     private void SetRefreshCookie(string refreshToken, DateTime expiresAtUtc)
     {
+        var secure = !bool.TryParse(_cfg["Jwt:RefreshCookieSecure"], out var secureCfg) || secureCfg;
+        var sameSite = Enum.TryParse<SameSiteMode>(_cfg["Jwt:RefreshCookieSameSite"], true, out var sameSiteCfg)
+            ? sameSiteCfg
+            : SameSiteMode.None;
+
         Response.Cookies.Append("refresh_token", refreshToken, new CookieOptions
         {
             HttpOnly = true,
-            Secure = true,
-            SameSite = SameSiteMode.None,
+            Secure = secure,
+            SameSite = sameSite,
             Expires = expiresAtUtc,
             Path = "/"
         });
