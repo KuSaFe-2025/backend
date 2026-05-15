@@ -354,7 +354,7 @@ public class MyGamesController : ControllerBase
 
         try
         {
-            ApplyTaskUpdate(task, req, updateOrder: false);
+            ApplyTaskUpdate(task, req, updateOrder: false, db: _db);
             TouchForContentChange(game);
 
             await ReorderTasksAsync(_db, tasks, task.Id, req.Order);
@@ -656,7 +656,7 @@ public class MyGamesController : ControllerBase
         await db.SaveChangesAsync();
     }
 
-    internal static void ApplyTaskUpdate(GameTask task, GameTaskUpsertRequest req, bool updateOrder = true)
+    internal static void ApplyTaskUpdate(GameTask task, GameTaskUpsertRequest req, bool updateOrder = true, AppDbContext? db = null)
     {
         var text = (req.Text ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(text)) throw new ArgumentException("Task text is required.");
@@ -683,12 +683,12 @@ public class MyGamesController : ControllerBase
                 if (options.Count < 2) throw new ArgumentException("Quiz requires at least 2 options.");
                 if (!req.CorrectOptionIndex.HasValue || req.CorrectOptionIndex < 0 || req.CorrectOptionIndex >= options.Count)
                     throw new ArgumentException("CorrectOptionIndex is out of range.");
-                SyncOptions(task, options);
+                SyncOptions(task, options, db);
                 MarkCorrectOptions(task, new[] { req.CorrectOptionIndex.Value });
                 task.CorrectOptionId = task.Options.OrderBy(o => o.SortOrder).ElementAt(req.CorrectOptionIndex.Value).Id;
                 break;
             case GameTaskType.TrueFalse:
-                SyncOptions(task, new List<string> { "Правда", "Ложь" });
+                SyncOptions(task, new List<string> { "Правда", "Ложь" }, db);
                 var tfIndex = req.CorrectOptionIndex ?? 0;
                 if (tfIndex is < 0 or > 1) throw new ArgumentException("CorrectOptionIndex must be 0 or 1 for TrueFalse.");
                 MarkCorrectOptions(task, new[] { tfIndex });
@@ -696,7 +696,7 @@ public class MyGamesController : ControllerBase
                 break;
             case GameTaskType.Puzzle:
                 if (options.Count < 2) throw new ArgumentException("Puzzle requires at least 2 items.");
-                SyncOptions(task, options);
+                SyncOptions(task, options, db);
                 task.CorrectOptionId = null;
                 break;
             case GameTaskType.Multichoice:
@@ -705,7 +705,7 @@ public class MyGamesController : ControllerBase
                 if (correctIndexes.Count == 0) throw new ArgumentException("Multichoice requires at least one correct option.");
                 if (correctIndexes.Any(i => i < 0 || i >= options.Count))
                     throw new ArgumentException("CorrectOptionIndexes contain an out of range value.");
-                SyncOptions(task, options);
+                SyncOptions(task, options, db);
                 MarkCorrectOptions(task, correctIndexes);
                 task.CorrectOptionId = null;
                 break;
@@ -715,7 +715,7 @@ public class MyGamesController : ControllerBase
                 break;
             case GameTaskType.Poll:
                 if (options.Count < 2) throw new ArgumentException("Poll requires at least 2 options.");
-                SyncOptions(task, options);
+                SyncOptions(task, options, db);
                 task.CorrectOptionId = null;
                 break;
             default:
@@ -723,7 +723,7 @@ public class MyGamesController : ControllerBase
         }
     }
 
-    private static void SyncOptions(GameTask task, List<string> texts)
+    private static void SyncOptions(GameTask task, List<string> texts, AppDbContext? db = null)
     {
         var existing = task.Options.OrderBy(o => o.SortOrder).ToList();
 
@@ -738,7 +738,7 @@ public class MyGamesController : ControllerBase
             }
             else
             {
-                task.Options.Add(new AnswerOption
+                var option = new AnswerOption
                 {
                     Id = Guid.NewGuid(),
                     GameTaskId = task.Id,
@@ -746,7 +746,9 @@ public class MyGamesController : ControllerBase
                     SortOrder = i,
                     IsActive = true,
                     IsCorrect = false
-                });
+                };
+                task.Options.Add(option);
+                if (db is not null) db.Entry(option).State = EntityState.Added;
             }
         }
 

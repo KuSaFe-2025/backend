@@ -129,7 +129,7 @@ public class AdminGamesController : ControllerBase
 
         try
         {
-            MyGamesController.ApplyTaskUpdate(task, req, updateOrder: false);
+            MyGamesController.ApplyTaskUpdate(task, req, updateOrder: false, db: _db);
             MyGamesController.TouchForContentChange(game);
             await MyGamesController.ReorderTasksAsync(_db, tasks, task.Id, req.Order);
             return NoContent();
