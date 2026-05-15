@@ -178,6 +178,54 @@ public class AdminGamesController : ControllerBase
         return game is null ? NotFound() : Ok(MyGamesController.BuildStatsDto(game));
     }
 
+    [HttpDelete("{gameId:guid}/stats")]
+    public async Task<IActionResult> ResetStats(Guid gameId)
+    {
+        var game = await _db.Games.Include(g => g.Attempts).FirstOrDefaultAsync(g => g.Id == gameId);
+        if (game is null) return NotFound();
+
+        _db.GameAttempts.RemoveRange(game.Attempts);
+        game.UpdatedAtUtc = DateTime.UtcNow;
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    [HttpDelete("{gameId:guid}/tasks/{taskId:guid}/stats")]
+    public async Task<IActionResult> ResetTaskStats(Guid gameId, Guid taskId)
+    {
+        var game = await _db.Games.FirstOrDefaultAsync(g => g.Id == gameId);
+        if (game is null) return NotFound();
+
+        var taskExists = await _db.GameTasks.AnyAsync(t => t.Id == taskId && t.GameId == gameId);
+        if (!taskExists) return NotFound();
+
+        var attemptIds = await _db.GameTaskAnswers
+            .Where(a => a.GameTaskId == taskId && a.Attempt.GameId == gameId)
+            .Select(a => a.AttemptId)
+            .Distinct()
+            .ToListAsync();
+
+        var answers = await _db.GameTaskAnswers
+            .Where(a => a.GameTaskId == taskId && a.Attempt.GameId == gameId)
+            .ToListAsync();
+        _db.GameTaskAnswers.RemoveRange(answers);
+        await _db.SaveChangesAsync();
+
+        await MyGamesController.RecalculateAttemptsAsync(_db, attemptIds);
+        game.UpdatedAtUtc = DateTime.UtcNow;
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    [HttpGet("{gameId:guid}/reviews")]
+    public async Task<IActionResult> Reviews(Guid gameId, [FromQuery] int skip = 0, [FromQuery] int take = 10, [FromQuery] string sort = "new")
+    {
+        var exists = await _db.Games.AsNoTracking().AnyAsync(g => g.Id == gameId);
+        if (!exists) return NotFound();
+
+        return Ok(await GamesController.BuildReviewsPage(_db.Reviews.AsNoTracking().Where(r => r.GameId == gameId), true, skip, take, sort));
+    }
+
     [HttpGet("{gameId:guid}/stats/export.csv")]
     public async Task<IActionResult> ExportStatsCsv(Guid gameId)
     {

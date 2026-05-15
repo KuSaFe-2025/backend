@@ -26,4 +26,5 @@ public class Game
 
     public ICollection<GameTask> Tasks { get; set; } = new List<GameTask>();
     public ICollection<GameAttempt> Attempts { get; set; } = new List<GameAttempt>();
+    public ICollection<Review> Reviews { get; set; } = new List<Review>();
 }

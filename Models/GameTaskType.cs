@@ -6,5 +6,6 @@ public enum GameTaskType
     TrueFalse = 1,
     Puzzle = 2,
     OpenEnded = 3,
-    Poll = 4
+    Poll = 4,
+    Multichoice = 5
 }

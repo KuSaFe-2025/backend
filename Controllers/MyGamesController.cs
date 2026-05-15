@@ -16,11 +16,13 @@ public class MyGamesController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IGameModerationService _moderation;
+    private readonly IAiAssistantService _ai;
 
-    public MyGamesController(AppDbContext db, IGameModerationService moderation)
+    public MyGamesController(AppDbContext db, IGameModerationService moderation, IAiAssistantService ai)
     {
         _db = db;
         _moderation = moderation;
+        _ai = ai;
     }
 
     [HttpGet]
@@ -168,6 +170,112 @@ public class MyGamesController : ControllerBase
 
         if (game is null) return NotFound();
         return Ok(BuildStatsDto(game));
+    }
+
+    [HttpDelete("{gameId:guid}/stats")]
+    public async Task<IActionResult> ResetStats(Guid gameId)
+    {
+        var game = await GetOwnedGameQuery().Include(g => g.Attempts).FirstOrDefaultAsync(g => g.Id == gameId);
+        if (game is null) return NotFound();
+
+        _db.GameAttempts.RemoveRange(game.Attempts);
+        game.UpdatedAtUtc = DateTime.UtcNow;
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    [HttpDelete("{gameId:guid}/tasks/{taskId:guid}/stats")]
+    public async Task<IActionResult> ResetTaskStats(Guid gameId, Guid taskId)
+    {
+        var game = await GetOwnedGameQuery().FirstOrDefaultAsync(g => g.Id == gameId);
+        if (game is null) return NotFound();
+
+        var taskExists = await _db.GameTasks.AnyAsync(t => t.Id == taskId && t.GameId == gameId);
+        if (!taskExists) return NotFound();
+
+        var attemptIds = await _db.GameTaskAnswers
+            .Where(a => a.GameTaskId == taskId && a.Attempt.GameId == gameId)
+            .Select(a => a.AttemptId)
+            .Distinct()
+            .ToListAsync();
+
+        var answers = await _db.GameTaskAnswers.Where(a => a.GameTaskId == taskId && a.Attempt.GameId == gameId).ToListAsync();
+        _db.GameTaskAnswers.RemoveRange(answers);
+        await _db.SaveChangesAsync();
+
+        await RecalculateAttemptsAsync(_db, attemptIds);
+        game.UpdatedAtUtc = DateTime.UtcNow;
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    [HttpGet("{gameId:guid}/reviews")]
+    public async Task<IActionResult> GetReviews(Guid gameId, [FromQuery] int skip = 0, [FromQuery] int take = 10, [FromQuery] string sort = "new")
+    {
+        var exists = await GetOwnedGameQuery().AnyAsync(g => g.Id == gameId);
+        if (!exists) return NotFound();
+
+        var canDelete = User.IsCurrentUserAdmin();
+        var query = _db.Reviews.AsNoTracking().Where(r => r.GameId == gameId);
+        return Ok(await GamesController.BuildReviewsPage(query, canDelete, skip, take, sort));
+    }
+
+    [HttpPost("{gameId:guid}/ai/rewrite/stream")]
+    public async Task RewriteWithAi(Guid gameId, [FromBody] AiRewriteRequest req)
+    {
+        var exists = await GetOwnedGameQuery().AnyAsync(g => g.Id == gameId);
+        if (!exists)
+        {
+            Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+
+        if (CountWords(req.Text) < 2)
+        {
+            Response.StatusCode = StatusCodes.Status400BadRequest;
+            await Response.WriteAsync("Для AI-переписывания нужно минимум два слова.", HttpContext.RequestAborted);
+            return;
+        }
+
+        Response.ContentType = "text/plain; charset=utf-8";
+        var result = await _ai.RewriteAsync(req.Field, req.Mode, req.Text, HttpContext.RequestAborted);
+        foreach (var chunk in Chunk(result, 24))
+        {
+            await Response.WriteAsync(chunk, HttpContext.RequestAborted);
+            await Response.Body.FlushAsync(HttpContext.RequestAborted);
+        }
+    }
+
+    [HttpPost("{gameId:guid}/ai/suggest-option")]
+    public async Task<IActionResult> SuggestOption(Guid gameId, [FromBody] AiSuggestOptionRequest req)
+    {
+        var exists = await GetOwnedGameQuery().AnyAsync(g => g.Id == gameId);
+        if (!exists) return NotFound();
+
+        try
+        {
+            return Ok(await _ai.SuggestOptionAsync(req, HttpContext.RequestAborted));
+        }
+        catch (InvalidOperationException e)
+        {
+            return BadRequest(e.Message);
+        }
+    }
+
+    [HttpPost("{gameId:guid}/ai/suggest-task")]
+    public async Task<IActionResult> SuggestTask(Guid gameId, [FromBody] AiSuggestTaskRequest req)
+    {
+        var exists = await GetOwnedGameQuery().AnyAsync(g => g.Id == gameId);
+        if (!exists) return NotFound();
+
+        try
+        {
+            return Ok(await _ai.SuggestTaskAsync(req, HttpContext.RequestAborted));
+        }
+        catch (InvalidOperationException e)
+        {
+            return BadRequest(e.Message);
+        }
     }
 
     [HttpGet("{gameId:guid}/stats/export.csv")]
@@ -318,7 +426,7 @@ public class MyGamesController : ControllerBase
                     t.CorrectOptionId,
                     t.Options
                         .OrderBy(o => o.SortOrder)
-                        .Select(o => new EditorOptionDto(o.Id, o.Text, o.IsActive, o.SortOrder))
+                        .Select(o => new EditorOptionDto(o.Id, o.Text, o.IsActive, o.SortOrder, o.IsCorrect))
                         .ToList()
                 ))
                 .ToList()
@@ -437,10 +545,43 @@ public class MyGamesController : ControllerBase
         return string.Join("\r\n", lines) + "\r\n";
     }
 
+    internal static async Task RecalculateAttemptsAsync(AppDbContext db, IEnumerable<Guid> attemptIds)
+    {
+        var ids = attemptIds.Distinct().ToList();
+        if (ids.Count == 0) return;
+
+        var attempts = await db.GameAttempts.Where(a => ids.Contains(a.Id)).ToListAsync();
+        foreach (var attempt in attempts)
+        {
+            var maxScore = await db.GameTasks
+                .Where(t => t.GameId == attempt.GameId && t.Type != GameTaskType.OpenEnded && t.Type != GameTaskType.Poll)
+                .SumAsync(t => (int?)t.Points) ?? 0;
+            var score = await db.GameTaskAnswers
+                .Where(a => a.AttemptId == attempt.Id && a.IsCorrect == true)
+                .Join(db.GameTasks, a => a.GameTaskId, t => t.Id, (_, t) => t.Points)
+                .SumAsync(x => (int?)x) ?? 0;
+
+            attempt.MaxScore = maxScore;
+            attempt.Score = score;
+            attempt.IsPerfect = score == maxScore && maxScore > 0;
+        }
+    }
+
     private static string Csv(object? value)
     {
         var s = Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? "";
         return "\"" + s.Replace("\"", "\"\"") + "\"";
+    }
+
+    private static int CountWords(string? text) =>
+        string.IsNullOrWhiteSpace(text)
+            ? 0
+            : text.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Length;
+
+    private static IEnumerable<string> Chunk(string text, int size)
+    {
+        for (var i = 0; i < text.Length; i += size)
+            yield return text.Substring(i, Math.Min(size, text.Length - i));
     }
 
     internal static void TouchForContentChange(Game game)
@@ -516,17 +657,29 @@ public class MyGamesController : ControllerBase
                 if (!req.CorrectOptionIndex.HasValue || req.CorrectOptionIndex < 0 || req.CorrectOptionIndex >= options.Count)
                     throw new ArgumentException("CorrectOptionIndex is out of range.");
                 SyncOptions(task, options);
+                MarkCorrectOptions(task, new[] { req.CorrectOptionIndex.Value });
                 task.CorrectOptionId = task.Options.OrderBy(o => o.SortOrder).ElementAt(req.CorrectOptionIndex.Value).Id;
                 break;
             case GameTaskType.TrueFalse:
                 SyncOptions(task, new List<string> { "Правда", "Ложь" });
                 var tfIndex = req.CorrectOptionIndex ?? 0;
                 if (tfIndex is < 0 or > 1) throw new ArgumentException("CorrectOptionIndex must be 0 or 1 for TrueFalse.");
+                MarkCorrectOptions(task, new[] { tfIndex });
                 task.CorrectOptionId = task.Options.OrderBy(o => o.SortOrder).ElementAt(tfIndex).Id;
                 break;
             case GameTaskType.Puzzle:
                 if (options.Count < 2) throw new ArgumentException("Puzzle requires at least 2 items.");
                 SyncOptions(task, options);
+                task.CorrectOptionId = null;
+                break;
+            case GameTaskType.Multichoice:
+                if (options.Count < 2) throw new ArgumentException("Multichoice requires at least 2 options.");
+                var correctIndexes = (req.CorrectOptionIndexes ?? new List<int>()).Distinct().OrderBy(x => x).ToList();
+                if (correctIndexes.Count == 0) throw new ArgumentException("Multichoice requires at least one correct option.");
+                if (correctIndexes.Any(i => i < 0 || i >= options.Count))
+                    throw new ArgumentException("CorrectOptionIndexes contain an out of range value.");
+                SyncOptions(task, options);
+                MarkCorrectOptions(task, correctIndexes);
                 task.CorrectOptionId = null;
                 break;
             case GameTaskType.OpenEnded:
@@ -554,6 +707,7 @@ public class MyGamesController : ControllerBase
                 existing[i].Text = texts[i];
                 existing[i].SortOrder = i;
                 existing[i].IsActive = true;
+                existing[i].IsCorrect = false;
             }
             else
             {
@@ -563,7 +717,8 @@ public class MyGamesController : ControllerBase
                     GameTaskId = task.Id,
                     Text = texts[i],
                     SortOrder = i,
-                    IsActive = true
+                    IsActive = true,
+                    IsCorrect = false
                 });
             }
         }
@@ -571,14 +726,26 @@ public class MyGamesController : ControllerBase
         for (var i = texts.Count; i < existing.Count; i++)
         {
             existing[i].IsActive = false;
+            existing[i].IsCorrect = false;
             existing[i].SortOrder = i;
         }
+    }
+
+    private static void MarkCorrectOptions(GameTask task, IEnumerable<int> correctIndexes)
+    {
+        var correct = correctIndexes.ToHashSet();
+        var active = task.Options.Where(o => o.IsActive).OrderBy(o => o.SortOrder).ToList();
+        for (var i = 0; i < active.Count; i++)
+            active[i].IsCorrect = correct.Contains(i);
     }
 
     private static void DeactivateAllOptions(GameTask task)
     {
         foreach (var option in task.Options)
+        {
             option.IsActive = false;
+            option.IsCorrect = false;
+        }
     }
 
     internal static string? NormalizeHexColor(string? input)

@@ -41,6 +41,22 @@ namespace KuSaFeBackend
                 });
             }
 
+            if (string.Equals(builder.Configuration["Ai:Provider"], "Deterministic", StringComparison.OrdinalIgnoreCase))
+            {
+                builder.Services.AddSingleton<IAiAssistantService, DeterministicAiAssistantService>();
+            }
+            else
+            {
+                builder.Services.AddHttpClient<IAiAssistantService, OllamaAiAssistantService>(client =>
+                {
+                    var baseUrl = builder.Configuration["Ai:OllamaBaseUrl"]
+                        ?? builder.Configuration["Moderation:OllamaBaseUrl"]
+                        ?? "http://localhost:11434";
+                    client.BaseAddress = new Uri(baseUrl);
+                    client.Timeout = TimeSpan.FromSeconds(90);
+                });
+            }
+
             // Registering AppLifetimeInfo as a singleton service
             builder.Services.AddSingleton<AppLifetimeInfo>();
 
@@ -144,6 +160,8 @@ namespace KuSaFeBackend
                 Console.WriteLine(created
                     ? "+ Database schema created"
                     : "~ Database schema already exists");
+
+                PatchExistingPostgresSchema(db);
             }
 
             // Configure the HTTP request pipeline.
@@ -164,6 +182,37 @@ namespace KuSaFeBackend
             app.MapControllers();
 
             app.Run();
+        }
+
+        private static void PatchExistingPostgresSchema(AppDbContext db)
+        {
+            if (!db.Database.IsNpgsql()) return;
+
+            db.Database.ExecuteSqlRaw("""
+                ALTER TABLE "AnswerOptions" ADD COLUMN IF NOT EXISTS "IsCorrect" boolean NOT NULL DEFAULT false;
+
+                UPDATE "AnswerOptions" o
+                SET "IsCorrect" = true
+                FROM "GameTasks" t
+                WHERE t."CorrectOptionId" = o."Id"
+                  AND o."IsCorrect" = false;
+
+                CREATE TABLE IF NOT EXISTS "Reviews" (
+                    "Id" uuid NOT NULL,
+                    "GameId" uuid NULL,
+                    "UserId" uuid NOT NULL,
+                    "Rating" integer NOT NULL,
+                    "Text" text NOT NULL,
+                    "CreatedAtUtc" timestamp with time zone NOT NULL,
+                    CONSTRAINT "PK_Reviews" PRIMARY KEY ("Id"),
+                    CONSTRAINT "FK_Reviews_Games_GameId" FOREIGN KEY ("GameId") REFERENCES "Games" ("Id") ON DELETE CASCADE,
+                    CONSTRAINT "FK_Reviews_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS "IX_Reviews_GameId_CreatedAtUtc" ON "Reviews" ("GameId", "CreatedAtUtc");
+                CREATE INDEX IF NOT EXISTS "IX_Reviews_GameId_Rating" ON "Reviews" ("GameId", "Rating");
+                CREATE INDEX IF NOT EXISTS "IX_Reviews_UserId" ON "Reviews" ("UserId");
+                """);
         }
     }
 }

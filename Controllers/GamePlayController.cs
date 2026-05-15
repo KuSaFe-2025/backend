@@ -47,6 +47,7 @@ public class GamePlayController : ControllerBase
         Guid AttemptId,
         string QuestionToken,
         Guid? SelectedOptionId,
+        List<Guid>? SelectedOptionIds,
         string? TextAnswer,
         List<Guid>? OrderedOptionIds
     );
@@ -273,7 +274,7 @@ public class GamePlayController : ControllerBase
             .Select(o => new OptionDto(o.Id, o.Text))
             .ToList();
 
-        if (task.Type is GameTaskType.Quiz or GameTaskType.TrueFalse or GameTaskType.Poll or GameTaskType.Puzzle)
+        if (task.Type is GameTaskType.Quiz or GameTaskType.TrueFalse or GameTaskType.Poll or GameTaskType.Puzzle or GameTaskType.Multichoice)
         {
             for (var i = options.Count - 1; i > 0; i--)
             {
@@ -292,6 +293,7 @@ public class GamePlayController : ControllerBase
         return task.Type switch
         {
             GameTaskType.Quiz or GameTaskType.TrueFalse => BuildSingleChoiceAnswer(req, task, spentMs),
+            GameTaskType.Multichoice => BuildMultichoiceAnswer(req, task, spentMs),
             GameTaskType.Poll => BuildPollAnswer(req, task, spentMs),
             GameTaskType.OpenEnded => BuildOpenEndedAnswer(req, task, spentMs),
             GameTaskType.Puzzle => BuildPuzzleAnswer(req, task, spentMs),
@@ -324,6 +326,30 @@ public class GamePlayController : ControllerBase
             throw new ArgumentException("SelectedOptionId is not in this task.");
 
         return new BuiltAnswer(Guid.NewGuid(), Guid.Empty, Guid.Empty, req.SelectedOptionId, null, null, null, spentMs);
+    }
+
+    private static BuiltAnswer BuildMultichoiceAnswer(AnswerRequest req, GameTask task, int spentMs)
+    {
+        var selected = (req.SelectedOptionIds ?? new List<Guid>()).Distinct().OrderBy(x => x).ToList();
+        if (selected.Count == 0) throw new ArgumentException("SelectedOptionIds is required.");
+
+        var active = task.Options.Where(o => o.IsActive).ToList();
+        if (selected.Except(active.Select(o => o.Id)).Any())
+            throw new ArgumentException("SelectedOptionIds contain unknown options.");
+
+        var correct = active.Where(o => o.IsCorrect).Select(o => o.Id).OrderBy(x => x).ToList();
+        var isCorrect = correct.SequenceEqual(selected);
+
+        return new BuiltAnswer(
+            Guid.NewGuid(),
+            Guid.Empty,
+            Guid.Empty,
+            null,
+            null,
+            JsonSerializer.Serialize(selected),
+            isCorrect,
+            spentMs
+        );
     }
 
     private static BuiltAnswer BuildOpenEndedAnswer(AnswerRequest req, GameTask task, int spentMs)

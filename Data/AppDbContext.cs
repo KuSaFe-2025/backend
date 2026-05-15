@@ -14,6 +14,7 @@ public class AppDbContext : DbContext
     public DbSet<GameAttempt> GameAttempts => Set<GameAttempt>();
     public DbSet<GameTaskAnswer> GameTaskAnswers => Set<GameTaskAnswer>();
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
+    public DbSet<Review> Reviews => Set<Review>();
 
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -65,5 +66,20 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<AnswerOption>()
             .Property(o => o.IsActive)
             .HasDefaultValue(true);
+
+        modelBuilder.Entity<AnswerOption>()
+            .Property(o => o.IsCorrect)
+            .HasDefaultValue(false);
+
+        modelBuilder.Entity<Review>()
+            .HasOne(r => r.Game).WithMany(g => g.Reviews)
+            .HasForeignKey(r => r.GameId).OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<Review>()
+            .HasOne(r => r.User).WithMany(u => u.Reviews)
+            .HasForeignKey(r => r.UserId).OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<Review>().HasIndex(r => new { r.GameId, r.CreatedAtUtc });
+        modelBuilder.Entity<Review>().HasIndex(r => new { r.GameId, r.Rating });
     }
 }

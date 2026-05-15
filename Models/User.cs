@@ -23,4 +23,5 @@ public class User
     public ICollection<Game> Games { get; set; } = new List<Game>();
     public ICollection<GameAttempt> Attempts { get; set; } = new List<GameAttempt>();
     public ICollection<RefreshToken> RefreshTokens { get; set; } = new List<RefreshToken>();
+    public ICollection<Review> Reviews { get; set; } = new List<Review>();
 }

@@ -2,7 +2,7 @@ using KuSaFeBackend.Models;
 
 namespace KuSaFeBackend.Contracts;
 
-public record EditorOptionDto(Guid Id, string Text, bool IsActive, int SortOrder);
+public record EditorOptionDto(Guid Id, string Text, bool IsActive, int SortOrder, bool IsCorrect);
 
 public record GameTaskEditorDto(
     Guid Id,
@@ -83,7 +83,8 @@ public record GameTaskUpsertRequest(
     int Points,
     int TimeLimitMs,
     List<string>? Options,
-    int? CorrectOptionIndex
+    int? CorrectOptionIndex,
+    List<int>? CorrectOptionIndexes = null
 );
 
 public record OwnerGameStatsTaskItemDto(
@@ -119,4 +120,41 @@ public record OwnerGameStatsDto(
     double AverageTimeMs,
     double PerfectRate,
     List<OwnerGameStatsTaskItemDto> Tasks
+);
+
+public record PageDto<T>(List<T> Items, int Total, int Skip, int Take, bool HasMore);
+
+public record GameAttemptListItemDto(
+    Guid AttemptId,
+    string DisplayName,
+    long TotalTimeMs,
+    DateTime FinishedAtUtc,
+    int Score,
+    int MaxScore
+);
+
+public record ReviewDto(
+    Guid Id,
+    Guid? GameId,
+    string? GameTitle,
+    string DisplayName,
+    int Rating,
+    string Text,
+    DateTime CreatedAtUtc,
+    bool CanDelete
+);
+
+public record ReviewCreateRequest(int Rating, string Text);
+
+public record AiRewriteRequest(string Field, string Mode, string Text);
+public record AiSuggestOptionRequest(GameTaskUpsertRequest Task, GameUpsertRequest Game);
+public record AiSuggestTaskRequest(GameUpsertRequest Game, List<GameTaskUpsertRequest> Tasks);
+public record AiSuggestOptionResponse(string Text);
+public record AiSuggestTaskResponse(
+    GameTaskType Type,
+    string Text,
+    int Points,
+    int TimeLimitMs,
+    List<string> Options,
+    List<int> CorrectOptionIndexes
 );

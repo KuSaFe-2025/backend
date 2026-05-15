@@ -14,4 +14,5 @@ public class AnswerOption
 
     public int SortOrder { get; set; }
     public bool IsActive { get; set; } = true;
+    public bool IsCorrect { get; set; }
 }
