@@ -127,6 +127,16 @@ namespace KuSaFeBackend
             using (var scope = app.Services.CreateScope())
             {
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+                var resetOnStartup = app.Configuration.GetValue<bool>("Database:ResetOnStartup");
+
+                if (resetOnStartup)
+                {
+                    if (!app.Environment.IsDevelopment() && !app.Environment.IsEnvironment("E2E"))
+                        throw new InvalidOperationException("Database:ResetOnStartup is allowed only in Development or E2E.");
+
+                    db.Database.EnsureDeleted();
+                    Console.WriteLine("! Database schema reset requested");
+                }
 
                 var created = db.Database.EnsureCreated(); // создаст таблицы, если их нет
                 Console.WriteLine(created
