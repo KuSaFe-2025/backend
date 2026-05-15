@@ -22,7 +22,7 @@ public class GamesController : ControllerBase
 
         var items = await _db.Games
             .AsNoTracking()
-            .Where(g => g.Status == GameStatus.Verified || (userId.HasValue && g.OwnerUserId == userId.Value) || isAdmin)
+            .Where(g => !g.IsPrivate && (g.Status == GameStatus.Verified || (userId.HasValue && g.OwnerUserId == userId.Value) || isAdmin))
             .OrderByDescending(g => g.UpdatedAtUtc)
             .Select(g => new GameListItemDto(
                 g.Id,
@@ -30,7 +30,54 @@ public class GamesController : ControllerBase
                 g.Description,
                 g.DescriptionFormat,
                 g.Tasks.Count,
+                g.Attempts.Count,
+                g.Reviews.Any() ? g.Reviews.Average(r => (double)r.Rating) : 0.0,
                 g.ThemeColor,
+                g.IsPrivate,
+                g.MaxAttemptsPerUser,
+                g.AvailableFromUtc,
+                g.AvailableUntilUtc,
+                g.Status,
+                g.LastModeratedAtUtc,
+                g.ModerationDecision,
+                g.ModerationYesVotes,
+                g.ModerationNoVotes,
+                g.OwnerUser.DisplayName,
+                isAdmin || (userId.HasValue && g.OwnerUserId == userId.Value)
+            ))
+            .ToListAsync();
+
+        return Ok(items);
+    }
+
+    [HttpGet("recommended")]
+    public async Task<IActionResult> Recommended()
+    {
+        var userId = User.GetCurrentUserId();
+        var isAdmin = User.IsCurrentUserAdmin();
+
+        var items = await _db.Games
+            .AsNoTracking()
+            .Where(g => g.Status == GameStatus.Verified && !g.IsPrivate)
+            .Where(g => g.Attempts.Count >= 1)
+            .Where(g => g.Reviews.Any() && g.Reviews.Average(r => (double)r.Rating) >= 3.0)
+            .OrderByDescending(g => g.Attempts.Count)
+            .ThenByDescending(g => g.Reviews.Any() ? g.Reviews.Average(r => (double)r.Rating) : 0.0)
+            .ThenByDescending(g => g.UpdatedAtUtc)
+            .Take(3)
+            .Select(g => new GameListItemDto(
+                g.Id,
+                g.Title,
+                g.Description,
+                g.DescriptionFormat,
+                g.Tasks.Count,
+                g.Attempts.Count,
+                g.Reviews.Any() ? g.Reviews.Average(r => (double)r.Rating) : 0.0,
+                g.ThemeColor,
+                g.IsPrivate,
+                g.MaxAttemptsPerUser,
+                g.AvailableFromUtc,
+                g.AvailableUntilUtc,
                 g.Status,
                 g.LastModeratedAtUtc,
                 g.ModerationDecision,
@@ -68,6 +115,10 @@ public class GamesController : ControllerBase
                 game.DescriptionFormat,
                 game.CreatedAtUtc,
                 game.ThemeColor,
+                game.IsPrivate,
+                game.MaxAttemptsPerUser,
+                game.AvailableFromUtc,
+                game.AvailableUntilUtc,
                 game.Status,
                 game.LastModeratedAtUtc,
                 game.ModerationDecision,
@@ -87,7 +138,7 @@ public class GamesController : ControllerBase
     {
         var item = await _db.Games
             .AsNoTracking()
-            .Where(g => g.Status == GameStatus.Verified)
+            .Where(g => g.Status == GameStatus.Verified && !g.IsPrivate)
             .OrderByDescending(g => g.Attempts.Count)
             .ThenByDescending(g => g.UpdatedAtUtc)
             .Select(g => new GameListItemDto(
@@ -96,7 +147,13 @@ public class GamesController : ControllerBase
                 g.Description,
                 g.DescriptionFormat,
                 g.Tasks.Count,
+                g.Attempts.Count,
+                g.Reviews.Any() ? g.Reviews.Average(r => (double)r.Rating) : 0.0,
                 g.ThemeColor,
+                g.IsPrivate,
+                g.MaxAttemptsPerUser,
+                g.AvailableFromUtc,
+                g.AvailableUntilUtc,
                 g.Status,
                 g.LastModeratedAtUtc,
                 g.ModerationDecision,
@@ -158,6 +215,7 @@ public class GamesController : ControllerBase
         var access = await GetPublicGameAccess(gameId);
         if (!access.Exists) return NotFound();
         if (!access.CanView) return NotFound();
+        if (access.IsPrivate && !access.CanManage) return NotFound();
 
         var isAdmin = User.IsCurrentUserAdmin();
         return Ok(await BuildReviewsPage(_db.Reviews.AsNoTracking().Where(r => r.GameId == gameId), isAdmin, skip, take, sort));
@@ -225,12 +283,13 @@ public class GamesController : ControllerBase
         return new PageDto<ReviewDto>(items, total, skip, take, skip + items.Count < total);
     }
 
-    private async Task<(bool Exists, bool CanView)> GetPublicGameAccess(Guid gameId)
+    private async Task<(bool Exists, bool CanView, bool CanManage, bool IsPrivate)> GetPublicGameAccess(Guid gameId)
     {
         var userId = User.GetCurrentUserId();
         var isAdmin = User.IsCurrentUserAdmin();
-        var game = await _db.Games.AsNoTracking().Where(g => g.Id == gameId).Select(g => new { g.Status, g.OwnerUserId }).FirstOrDefaultAsync();
-        if (game is null) return (false, false);
-        return (true, game.Status == GameStatus.Verified || isAdmin || (userId.HasValue && game.OwnerUserId == userId.Value));
+        var game = await _db.Games.AsNoTracking().Where(g => g.Id == gameId).Select(g => new { g.Status, g.OwnerUserId, g.IsPrivate }).FirstOrDefaultAsync();
+        if (game is null) return (false, false, false, false);
+        var canManage = isAdmin || (userId.HasValue && game.OwnerUserId == userId.Value);
+        return (true, game.Status == GameStatus.Verified || canManage, canManage, game.IsPrivate);
     }
 }

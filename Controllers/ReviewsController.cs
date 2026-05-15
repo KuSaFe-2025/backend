@@ -20,7 +20,7 @@ public class ReviewsController : ControllerBase
         var isAdmin = User.IsCurrentUserAdmin();
         var query = _db.Reviews
             .AsNoTracking()
-            .Where(r => r.GameId == null || r.Game!.Status == GameStatus.Verified);
+            .Where(r => r.GameId == null || (r.Game!.Status == GameStatus.Verified && !r.Game.IsPrivate));
 
         return Ok(await GamesController.BuildReviewsPage(query, isAdmin, skip, take, sort));
     }

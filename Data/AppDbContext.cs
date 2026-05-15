@@ -24,6 +24,11 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<User>().HasIndex(x => x.Email).IsUnique();
         modelBuilder.Entity<GameTask>().HasIndex(x => new { x.GameId, x.Order }).IsUnique();
         modelBuilder.Entity<GameAttempt>().HasIndex(a => new { a.GameId, a.IsPerfect, a.TotalTimeMs });
+        modelBuilder.Entity<GameAttempt>().HasIndex(a => new { a.GameId, a.UserId });
+
+        modelBuilder.Entity<Game>()
+            .Property(g => g.IsPrivate)
+            .HasDefaultValue(false);
 
         modelBuilder.Entity<Game>()
             .HasOne(g => g.OwnerUser).WithMany(u => u.Games)

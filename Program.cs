@@ -189,6 +189,24 @@ namespace KuSaFeBackend
             if (!db.Database.IsNpgsql()) return;
 
             db.Database.ExecuteSqlRaw("""
+                ALTER TABLE "Games" ADD COLUMN IF NOT EXISTS "IsPrivate" boolean NOT NULL DEFAULT false;
+                ALTER TABLE "Games" ADD COLUMN IF NOT EXISTS "MaxAttemptsPerUser" integer NULL;
+                ALTER TABLE "Games" ADD COLUMN IF NOT EXISTS "AvailableFromUtc" timestamp with time zone NULL;
+                ALTER TABLE "Games" ADD COLUMN IF NOT EXISTS "AvailableUntilUtc" timestamp with time zone NULL;
+
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'Games'
+                          AND column_name = 'OneAttemptPerUser'
+                    ) THEN
+                        EXECUTE 'UPDATE "Games" SET "MaxAttemptsPerUser" = CASE WHEN "OneAttemptPerUser" THEN 1 ELSE NULL END WHERE "MaxAttemptsPerUser" IS NULL';
+                    END IF;
+                END $$;
+
                 ALTER TABLE "AnswerOptions" ADD COLUMN IF NOT EXISTS "IsCorrect" boolean NOT NULL DEFAULT false;
 
                 UPDATE "AnswerOptions" o
@@ -212,6 +230,7 @@ namespace KuSaFeBackend
                 CREATE INDEX IF NOT EXISTS "IX_Reviews_GameId_CreatedAtUtc" ON "Reviews" ("GameId", "CreatedAtUtc");
                 CREATE INDEX IF NOT EXISTS "IX_Reviews_GameId_Rating" ON "Reviews" ("GameId", "Rating");
                 CREATE INDEX IF NOT EXISTS "IX_Reviews_UserId" ON "Reviews" ("UserId");
+                CREATE INDEX IF NOT EXISTS "IX_GameAttempts_GameId_UserId" ON "GameAttempts" ("GameId", "UserId");
                 """);
         }
     }

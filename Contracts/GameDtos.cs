@@ -21,6 +21,10 @@ public record GameEditorDto(
     string? Description,
     DescriptionFormat DescriptionFormat,
     string? ThemeColor,
+    bool IsPrivate,
+    int? MaxAttemptsPerUser,
+    DateTime? AvailableFromUtc,
+    DateTime? AvailableUntilUtc,
     GameStatus Status,
     DateTime? LastModeratedAtUtc,
     string? ModerationDecision,
@@ -39,7 +43,13 @@ public record GameListItemDto(
     string? Description,
     DescriptionFormat DescriptionFormat,
     int TasksCount,
+    int AttemptsCount,
+    double AverageRating,
     string? ThemeColor,
+    bool IsPrivate,
+    int? MaxAttemptsPerUser,
+    DateTime? AvailableFromUtc,
+    DateTime? AvailableUntilUtc,
     GameStatus Status,
     DateTime? LastModeratedAtUtc,
     string? ModerationDecision,
@@ -58,6 +68,10 @@ public record GameDetailsDto(
     DescriptionFormat DescriptionFormat,
     DateTime CreatedAtUtc,
     string? ThemeColor,
+    bool IsPrivate,
+    int? MaxAttemptsPerUser,
+    DateTime? AvailableFromUtc,
+    DateTime? AvailableUntilUtc,
     GameStatus Status,
     DateTime? LastModeratedAtUtc,
     string? ModerationDecision,
@@ -73,7 +87,11 @@ public record GameUpsertRequest(
     string Title,
     string? Description,
     DescriptionFormat DescriptionFormat,
-    string? ThemeColor
+    string? ThemeColor,
+    bool IsPrivate = false,
+    int? MaxAttemptsPerUser = null,
+    DateTime? AvailableFromUtc = null,
+    DateTime? AvailableUntilUtc = null
 );
 
 public record GameTaskUpsertRequest(

@@ -27,7 +27,13 @@ public class AdminGamesController : ControllerBase
                 g.Description,
                 g.DescriptionFormat,
                 g.Tasks.Count,
+                g.Attempts.Count,
+                g.Reviews.Any() ? g.Reviews.Average(r => (double)r.Rating) : 0.0,
                 g.ThemeColor,
+                g.IsPrivate,
+                g.MaxAttemptsPerUser,
+                g.AvailableFromUtc,
+                g.AvailableUntilUtc,
                 g.Status,
                 g.LastModeratedAtUtc,
                 g.ModerationDecision,
@@ -62,11 +68,19 @@ public class AdminGamesController : ControllerBase
         var title = (req.Title ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(title)) return BadRequest("Title is required.");
         if (title.Length > 200) return BadRequest("Title too long (max 200).");
+        if (!MyGamesController.IsValidAvailabilityWindow(req.AvailableFromUtc, req.AvailableUntilUtc))
+            return BadRequest("AvailableUntilUtc must be later than AvailableFromUtc.");
+        if (!MyGamesController.IsValidMaxAttempts(req.MaxAttemptsPerUser))
+            return BadRequest("MaxAttemptsPerUser must be at least 1.");
 
         game.Title = title;
         game.Description = req.Description;
         game.DescriptionFormat = req.DescriptionFormat;
         game.ThemeColor = MyGamesController.NormalizeHexColor(req.ThemeColor) ?? game.ThemeColor ?? "#7C3AED";
+        game.IsPrivate = req.IsPrivate;
+        game.MaxAttemptsPerUser = req.MaxAttemptsPerUser;
+        game.AvailableFromUtc = MyGamesController.NormalizeUtc(req.AvailableFromUtc);
+        game.AvailableUntilUtc = MyGamesController.NormalizeUtc(req.AvailableUntilUtc);
         MyGamesController.TouchForContentChange(game);
 
         await _db.SaveChangesAsync();

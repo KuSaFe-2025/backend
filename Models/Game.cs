@@ -15,6 +15,10 @@ public class Game
     public string? Description { get; set; }
     public DescriptionFormat DescriptionFormat { get; set; } = DescriptionFormat.Markdown;
     public string? ThemeColor { get; set; }
+    public bool IsPrivate { get; set; }
+    public int? MaxAttemptsPerUser { get; set; }
+    public DateTime? AvailableFromUtc { get; set; }
+    public DateTime? AvailableUntilUtc { get; set; }
     public GameStatus Status { get; set; } = GameStatus.Unverified;
     public DateTime? LastModeratedAtUtc { get; set; }
     public string? ModerationDecision { get; set; }

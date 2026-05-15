@@ -41,7 +41,13 @@ public class MyGamesController : ControllerBase
                 g.Description,
                 g.DescriptionFormat,
                 g.Tasks.Count,
+                g.Attempts.Count,
+                g.Reviews.Any() ? g.Reviews.Average(r => (double)r.Rating) : 0.0,
                 g.ThemeColor,
+                g.IsPrivate,
+                g.MaxAttemptsPerUser,
+                g.AvailableFromUtc,
+                g.AvailableUntilUtc,
                 g.Status,
                 g.LastModeratedAtUtc,
                 g.ModerationDecision,
@@ -64,6 +70,10 @@ public class MyGamesController : ControllerBase
         var title = (req.Title ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(title)) return BadRequest("Title is required.");
         if (title.Length > 200) return BadRequest("Title too long (max 200).");
+        if (!IsValidAvailabilityWindow(req.AvailableFromUtc, req.AvailableUntilUtc))
+            return BadRequest("AvailableUntilUtc must be later than AvailableFromUtc.");
+        if (!IsValidMaxAttempts(req.MaxAttemptsPerUser))
+            return BadRequest("MaxAttemptsPerUser must be at least 1.");
 
         var game = new Game
         {
@@ -73,6 +83,10 @@ public class MyGamesController : ControllerBase
             Description = req.Description,
             DescriptionFormat = req.DescriptionFormat,
             ThemeColor = NormalizeHexColor(req.ThemeColor) ?? "#7C3AED",
+            IsPrivate = req.IsPrivate,
+            MaxAttemptsPerUser = req.MaxAttemptsPerUser,
+            AvailableFromUtc = NormalizeUtc(req.AvailableFromUtc),
+            AvailableUntilUtc = NormalizeUtc(req.AvailableUntilUtc),
             Status = GameStatus.Unverified,
             CreatedAtUtc = DateTime.UtcNow,
             UpdatedAtUtc = DateTime.UtcNow
@@ -104,11 +118,19 @@ public class MyGamesController : ControllerBase
         var title = (req.Title ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(title)) return BadRequest("Title is required.");
         if (title.Length > 200) return BadRequest("Title too long (max 200).");
+        if (!IsValidAvailabilityWindow(req.AvailableFromUtc, req.AvailableUntilUtc))
+            return BadRequest("AvailableUntilUtc must be later than AvailableFromUtc.");
+        if (!IsValidMaxAttempts(req.MaxAttemptsPerUser))
+            return BadRequest("MaxAttemptsPerUser must be at least 1.");
 
         game.Title = title;
         game.Description = req.Description;
         game.DescriptionFormat = req.DescriptionFormat;
         game.ThemeColor = NormalizeHexColor(req.ThemeColor) ?? game.ThemeColor ?? "#7C3AED";
+        game.IsPrivate = req.IsPrivate;
+        game.MaxAttemptsPerUser = req.MaxAttemptsPerUser;
+        game.AvailableFromUtc = NormalizeUtc(req.AvailableFromUtc);
+        game.AvailableUntilUtc = NormalizeUtc(req.AvailableUntilUtc);
         TouchForContentChange(game);
 
         await _db.SaveChangesAsync();
@@ -419,6 +441,10 @@ public class MyGamesController : ControllerBase
             g.Description,
             g.DescriptionFormat,
             g.ThemeColor,
+            g.IsPrivate,
+            g.MaxAttemptsPerUser,
+            g.AvailableFromUtc,
+            g.AvailableUntilUtc,
             g.Status,
             g.LastModeratedAtUtc,
             g.ModerationDecision,
@@ -794,4 +820,24 @@ public class MyGamesController : ControllerBase
 
         return s.ToUpperInvariant();
     }
+
+    internal static DateTime? NormalizeUtc(DateTime? value)
+    {
+        if (!value.HasValue) return null;
+        return value.Value.Kind switch
+        {
+            DateTimeKind.Utc => value.Value,
+            DateTimeKind.Local => value.Value.ToUniversalTime(),
+            _ => DateTime.SpecifyKind(value.Value, DateTimeKind.Utc)
+        };
+    }
+
+    internal static bool IsValidAvailabilityWindow(DateTime? from, DateTime? until)
+    {
+        var normalizedFrom = NormalizeUtc(from);
+        var normalizedUntil = NormalizeUtc(until);
+        return !normalizedFrom.HasValue || !normalizedUntil.HasValue || normalizedUntil.Value > normalizedFrom.Value;
+    }
+
+    internal static bool IsValidMaxAttempts(int? value) => !value.HasValue || value.Value >= 1;
 }

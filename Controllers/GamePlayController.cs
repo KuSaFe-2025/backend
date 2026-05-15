@@ -87,12 +87,33 @@ public class GamePlayController : ControllerBase
         var game = await _db.Games
             .AsNoTracking()
             .Where(g => g.Id == gameId)
-            .Select(g => new { g.Id, g.OwnerUserId, g.Status })
+            .Select(g => new
+            {
+                g.Id,
+                g.OwnerUserId,
+                g.Status,
+                g.MaxAttemptsPerUser,
+                g.AvailableFromUtc,
+                g.AvailableUntilUtc
+            })
             .FirstOrDefaultAsync();
 
         if (game is null) return NotFound();
         if (game.Status != GameStatus.Verified && !User.IsCurrentUserAdmin() && game.OwnerUserId != userId.Value)
             return NotFound();
+
+        var now = DateTime.UtcNow;
+        if (game.AvailableFromUtc.HasValue && now < game.AvailableFromUtc.Value)
+            return BadRequest("Игра ещё недоступна для прохождения.");
+        if (game.AvailableUntilUtc.HasValue && now > game.AvailableUntilUtc.Value)
+            return BadRequest("Период прохождения игры завершён.");
+
+        if (game.MaxAttemptsPerUser.HasValue)
+        {
+            var attemptsCount = await _db.GameAttempts.CountAsync(a => a.GameId == gameId && a.UserId == userId.Value);
+            if (attemptsCount >= game.MaxAttemptsPerUser.Value)
+                return Conflict($"Вы уже использовали максимум попыток для этой игры: {game.MaxAttemptsPerUser.Value}.");
+        }
 
         var firstTask = await _db.GameTasks
             .AsNoTracking()
@@ -104,7 +125,6 @@ public class GamePlayController : ControllerBase
         if (firstTask is null) return BadRequest("Game has no tasks.");
 
         var maxScore = await GetMaxScore(gameId);
-        var now = DateTime.UtcNow;
 
         var attempt = new GameAttempt
         {
