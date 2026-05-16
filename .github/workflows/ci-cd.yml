@@ -59,25 +59,54 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
 
-      - name: Prepare deploy directory
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT }}
-          script: mkdir -p "${{ env.DEPLOY_DIR }}"
+      - name: Upload compose with SSH retries
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
 
-      - name: Upload compose for first deploy
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT }}
-          source: deploy/docker-compose.prod.yml
-          target: ${{ env.DEPLOY_DIR }}
-          strip_components: 1
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/kusafe_deploy_key
+          chmod 600 ~/.ssh/kusafe_deploy_key
+
+          ssh_opts=(
+            -i ~/.ssh/kusafe_deploy_key
+            -p "$DEPLOY_PORT"
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=accept-new
+            -o ConnectTimeout=30
+            -o ServerAliveInterval=30
+            -o ServerAliveCountMax=6
+          )
+          scp_opts=(
+            -i ~/.ssh/kusafe_deploy_key
+            -P "$DEPLOY_PORT"
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=accept-new
+            -o ConnectTimeout=30
+            -o ServerAliveInterval=30
+            -o ServerAliveCountMax=6
+          )
+
+          for attempt in $(seq 1 5); do
+            echo "Uploading compose file (${attempt}/5)."
+            if ssh "${ssh_opts[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '${{ env.DEPLOY_DIR }}'" &&
+               scp "${scp_opts[@]}" deploy/docker-compose.prod.yml "$DEPLOY_USER@$DEPLOY_HOST:${{ env.DEPLOY_DIR }}/docker-compose.prod.yml"; then
+              echo "Compose upload succeeded."
+              exit 0
+            fi
+
+            sleep_seconds=$((attempt * 5))
+            echo "Compose upload failed; retrying in ${sleep_seconds}s."
+            sleep "$sleep_seconds"
+          done
+
+          echo "Compose upload failed after 5 attempts."
+          exit 1
 
       - name: Deploy backend on server
         uses: appleboy/ssh-action@v1.2.0
