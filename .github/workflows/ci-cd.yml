@@ -59,13 +59,17 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
 
-      - name: Upload compose with SSH retries
+      - name: Deploy backend over SSH with retries
         shell: bash
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          PROD_POSTGRES_PASSWORD: ${{ secrets.PROD_POSTGRES_PASSWORD }}
+          PROD_JWT_KEY: ${{ secrets.PROD_JWT_KEY }}
+          GHCR_READ_USER: ${{ secrets.GHCR_READ_USER }}
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -82,74 +86,77 @@ jobs:
             -o ServerAliveInterval=30
             -o ServerAliveCountMax=6
           )
-          scp_opts=(
-            -i ~/.ssh/kusafe_deploy_key
-            -P "$DEPLOY_PORT"
-            -o BatchMode=yes
-            -o StrictHostKeyChecking=accept-new
-            -o ConnectTimeout=30
-            -o ServerAliveInterval=30
-            -o ServerAliveCountMax=6
+
+          compose_b64=$(base64 -w0 deploy/docker-compose.prod.yml)
+          remote_prefix=$(
+            printf 'DEPLOY_DIR=%q POSTGRES_PASSWORD=%q JWT_KEY=%q GHCR_READ_USER=%q GHCR_READ_TOKEN=%q BACKEND_TAG=%q FRONTEND_TAG=%q COMPOSE_B64=%q bash -se' \
+              '${{ env.DEPLOY_DIR }}' \
+              "$PROD_POSTGRES_PASSWORD" \
+              "$PROD_JWT_KEY" \
+              "$GHCR_READ_USER" \
+              "$GHCR_READ_TOKEN" \
+              '${{ github.ref_name }}' \
+              '${{ github.ref_name }}' \
+              "$compose_b64"
           )
 
           for attempt in $(seq 1 5); do
-            echo "Uploading compose file (${attempt}/5)."
-            if ssh "${ssh_opts[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '${{ env.DEPLOY_DIR }}'" &&
-               scp "${scp_opts[@]}" deploy/docker-compose.prod.yml "$DEPLOY_USER@$DEPLOY_HOST:${{ env.DEPLOY_DIR }}/docker-compose.prod.yml"; then
-              echo "Compose upload succeeded."
+            echo "Deploying backend (${attempt}/5)."
+            if ssh "${ssh_opts[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "$remote_prefix" <<'REMOTE_SCRIPT'
+              set -euo pipefail
+
+              mkdir -p "$DEPLOY_DIR"
+              cd "$DEPLOY_DIR"
+
+              printf '%s' "$COMPOSE_B64" | base64 -d > docker-compose.prod.yml
+
+              if [ ! -f .env ]; then
+                printf '%s\n' \
+                  'POSTGRES_DB=kusafe_db' \
+                  'POSTGRES_USER=postgres' \
+                  "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}" \
+                  "JWT_KEY=${JWT_KEY}" \
+                  'OLLAMA_MODEL=llama3.1:8b' \
+                  "BACKEND_TAG=${BACKEND_TAG}" \
+                  "FRONTEND_TAG=${FRONTEND_TAG}" > .env
+              fi
+
+              if grep -q '^BACKEND_TAG=' .env; then
+                sed -i "s/^BACKEND_TAG=.*/BACKEND_TAG=${BACKEND_TAG}/" .env
+              else
+                printf '%s\n' "BACKEND_TAG=${BACKEND_TAG}" >> .env
+              fi
+
+              printf '%s\n' "$GHCR_READ_TOKEN" | docker login ghcr.io -u "$GHCR_READ_USER" --password-stdin
+              docker compose -f docker-compose.prod.yml pull backend
+              docker compose -f docker-compose.prod.yml up -d postgres ollama backend
+              docker image prune -f
+
+              for health_attempt in $(seq 1 60); do
+                if curl -fsS http://127.0.0.1:5000/v1/health >/dev/null; then
+                  echo "Backend healthcheck passed on attempt ${health_attempt}."
+                  exit 0
+                fi
+
+                echo "Backend is not ready yet (${health_attempt}/60)."
+                docker compose -f docker-compose.prod.yml ps backend
+                sleep 2
+              done
+
+              echo "Backend did not become healthy in time."
+              docker compose -f docker-compose.prod.yml ps
+              docker logs --tail=200 kusafe-backend || true
+              exit 1
+REMOTE_SCRIPT
+            then
+              echo "Backend deploy succeeded."
               exit 0
             fi
 
             sleep_seconds=$((attempt * 5))
-            echo "Compose upload failed; retrying in ${sleep_seconds}s."
+            echo "Backend deploy attempt failed; retrying in ${sleep_seconds}s."
             sleep "$sleep_seconds"
           done
 
-          echo "Compose upload failed after 5 attempts."
+          echo "Backend deploy failed after 5 attempts."
           exit 1
-
-      - name: Deploy backend on server
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT }}
-          script: |
-            set -euo pipefail
-            mkdir -p "${{ env.DEPLOY_DIR }}"
-            cd "${{ env.DEPLOY_DIR }}"
-            if [ ! -f .env ]; then
-              printf '%s\n' \
-                'POSTGRES_DB=kusafe_db' \
-                'POSTGRES_USER=postgres' \
-                'POSTGRES_PASSWORD=${{ secrets.PROD_POSTGRES_PASSWORD }}' \
-                'JWT_KEY=${{ secrets.PROD_JWT_KEY }}' \
-                'OLLAMA_MODEL=llama3.1:8b' \
-                'BACKEND_TAG=${{ github.ref_name }}' \
-                'FRONTEND_TAG=${{ github.ref_name }}' > .env
-            fi
-            if grep -q '^BACKEND_TAG=' .env; then
-              sed -i 's/^BACKEND_TAG=.*/BACKEND_TAG=${{ github.ref_name }}/' .env
-            else
-              printf '%s\n' 'BACKEND_TAG=${{ github.ref_name }}' >> .env
-            fi
-            echo '${{ secrets.GHCR_READ_TOKEN }}' | docker login ghcr.io -u '${{ secrets.GHCR_READ_USER }}' --password-stdin
-            docker compose -f docker-compose.prod.yml pull backend
-            docker compose -f docker-compose.prod.yml up -d postgres ollama backend
-            docker image prune -f
-            for attempt in $(seq 1 60); do
-              if curl -fsS http://127.0.0.1:5000/v1/health >/dev/null; then
-                echo "Backend healthcheck passed on attempt ${attempt}."
-                exit 0
-              fi
-
-              echo "Backend is not ready yet (${attempt}/60)."
-              docker compose -f docker-compose.prod.yml ps backend
-              sleep 2
-            done
-
-            echo "Backend did not become healthy in time."
-            docker compose -f docker-compose.prod.yml ps
-            docker logs --tail=200 kusafe-backend || true
-            exit 1
