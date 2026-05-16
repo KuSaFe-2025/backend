@@ -109,4 +109,18 @@ jobs:
             docker compose -f docker-compose.prod.yml pull backend
             docker compose -f docker-compose.prod.yml up -d postgres ollama backend
             docker image prune -f
-            curl -fsS http://127.0.0.1:5000/v1/health >/dev/null
+            for attempt in $(seq 1 60); do
+              if curl -fsS http://127.0.0.1:5000/v1/health >/dev/null; then
+                echo "Backend healthcheck passed on attempt ${attempt}."
+                exit 0
+              fi
+
+              echo "Backend is not ready yet (${attempt}/60)."
+              docker compose -f docker-compose.prod.yml ps backend
+              sleep 2
+            done
+
+            echo "Backend did not become healthy in time."
+            docker compose -f docker-compose.prod.yml ps
+            docker logs --tail=200 kusafe-backend || true
+            exit 1
