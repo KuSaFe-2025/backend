@@ -97,8 +97,13 @@ jobs:
                 'POSTGRES_PASSWORD=${{ secrets.PROD_POSTGRES_PASSWORD }}' \
                 'JWT_KEY=${{ secrets.PROD_JWT_KEY }}' \
                 'OLLAMA_MODEL=llama3.1:8b' \
-                'BACKEND_TAG=main' \
-                'FRONTEND_TAG=main' > .env
+                'BACKEND_TAG=${{ github.ref_name }}' \
+                'FRONTEND_TAG=${{ github.ref_name }}' > .env
+            fi
+            if grep -q '^BACKEND_TAG=' .env; then
+              sed -i 's/^BACKEND_TAG=.*/BACKEND_TAG=${{ github.ref_name }}/' .env
+            else
+              printf '%s\n' 'BACKEND_TAG=${{ github.ref_name }}' >> .env
             fi
             echo '${{ secrets.GHCR_READ_TOKEN }}' | docker login ghcr.io -u '${{ secrets.GHCR_READ_USER }}' --password-stdin
             docker compose -f docker-compose.prod.yml pull backend
