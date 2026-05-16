@@ -147,7 +147,7 @@ jobs:
               docker compose -f docker-compose.prod.yml ps
               docker logs --tail=200 kusafe-backend || true
               exit 1
-REMOTE_SCRIPT
+          REMOTE_SCRIPT
             then
               echo "Backend deploy succeeded."
               exit 0
