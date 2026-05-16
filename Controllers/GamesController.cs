@@ -189,6 +189,18 @@ public class GamesController : ControllerBase
             query = query.Where(a => a.Answers.Count == tasksCount);
         }
 
+        var taskCounts = await _db.GameTasks
+            .Where(t => t.GameId == gameId)
+            .GroupBy(t => 1)
+            .Select(g => new
+            {
+                Total = g.Count(),
+                Scored = g.Count(t => t.Type != GameTaskType.OpenEnded && t.Type != GameTaskType.Poll)
+            })
+            .FirstOrDefaultAsync();
+        var scoredTasks = taskCounts?.Scored ?? 0;
+        var neutralTasks = Math.Max(0, (taskCounts?.Total ?? 0) - scoredTasks);
+
         query = sort switch
         {
             "date_asc" => query.OrderBy(a => a.FinishedAtUtc),
@@ -203,7 +215,17 @@ public class GamesController : ControllerBase
         var items = await query
             .Skip(skip)
             .Take(take)
-            .Select(a => new GameAttemptListItemDto(a.Id, a.User.DisplayName, a.TotalTimeMs, a.FinishedAtUtc, a.Score, a.MaxScore))
+            .Select(a => new GameAttemptListItemDto(
+                a.Id,
+                a.User.DisplayName,
+                a.TotalTimeMs,
+                a.FinishedAtUtc,
+                a.Score,
+                a.MaxScore,
+                a.Answers.Count(x => x.IsCorrect == true),
+                scoredTasks,
+                neutralTasks
+            ))
             .ToListAsync();
 
         return Ok(new PageDto<GameAttemptListItemDto>(items, total, skip, take, skip + items.Count < total));

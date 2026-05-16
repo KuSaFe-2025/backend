@@ -148,8 +148,46 @@ public record GameAttemptListItemDto(
     long TotalTimeMs,
     DateTime FinishedAtUtc,
     int Score,
-    int MaxScore
+    int MaxScore,
+    int CorrectAnswers,
+    int ScoredTasks,
+    int NeutralTasks
 );
+
+public record AttemptReviewOptionDto(Guid Id, string Text);
+
+public record AttemptReviewItemDto(
+    Guid AnswerId,
+    Guid TaskId,
+    GameTaskType Type,
+    int Order,
+    string TaskText,
+    int Points,
+    int TimeSpentMs,
+    bool? IsCorrect,
+    List<AttemptReviewOptionDto> Options,
+    List<Guid> SelectedOptionIds,
+    List<string> SelectedOptionTexts,
+    string? TextAnswer,
+    List<Guid> SubmittedOrderOptionIds,
+    List<string> SubmittedOrderTexts,
+    List<Guid> CorrectOptionIds,
+    List<string> CorrectOptionTexts
+);
+
+public record AttemptReviewDto(
+    Guid AttemptId,
+    Guid GameId,
+    string GameTitle,
+    int Score,
+    int MaxScore,
+    long TotalTimeMs,
+    DateTime StartedAtUtc,
+    DateTime FinishedAtUtc,
+    List<AttemptReviewItemDto> Items
+);
+
+public record AiExplainAnswerResponse(string Explanation);
 
 public record ReviewDto(
     Guid Id,

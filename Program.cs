@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
+using Microsoft.Data.Sqlite;
 using Microsoft.OpenApi.Models;
 using KuSaFeBackend.Services;
 
@@ -14,14 +15,20 @@ namespace KuSaFeBackend
         {
             var builder = WebApplication.CreateBuilder(args);
 
-            builder.Services.AddDbContext<AppDbContext>(options =>
+            builder.Services.AddDbContext<AppDbContext>((sp, options) =>
             {
                 var cs = builder.Configuration.GetConnectionString("DefaultConnection");
                 var provider = builder.Configuration["Database:Provider"];
                 if (string.Equals(provider, "Sqlite", StringComparison.OrdinalIgnoreCase))
-                    options.UseSqlite(cs);
+                {
+                    var connection = sp.GetService<SqliteConnection>();
+                    if (connection is not null) options.UseSqlite(connection);
+                    else options.UseSqlite(cs);
+                }
                 else
+                {
                     options.UseNpgsql(cs);
+                }
             });
 
             // Add services to the container.

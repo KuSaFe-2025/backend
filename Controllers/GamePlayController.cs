@@ -3,7 +3,9 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using KuSaFeBackend.Contracts;
 using KuSaFeBackend.Models;
+using KuSaFeBackend.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -17,11 +19,13 @@ public class GamePlayController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IConfiguration _cfg;
+    private readonly IAiAssistantService _ai;
 
-    public GamePlayController(AppDbContext db, IConfiguration cfg)
+    public GamePlayController(AppDbContext db, IConfiguration cfg, IAiAssistantService ai)
     {
         _db = db;
         _cfg = cfg;
+        _ai = ai;
     }
 
     public record OptionDto(Guid Id, string Text);
@@ -60,6 +64,8 @@ public class GamePlayController : ControllerBase
         int MaxScore,
         int CorrectAnswers,
         int TotalTasks,
+        int ScoredTasks,
+        int NeutralTasks,
         long TotalTimeMs,
         string? NextQuestionToken,
         DateTime? NextQuestionExpiresAtUtc,
@@ -74,7 +80,9 @@ public class GamePlayController : ControllerBase
         int Score,
         int MaxScore,
         int CorrectAnswers,
-        int TotalTasks
+        int TotalTasks,
+        int ScoredTasks,
+        int NeutralTasks
     );
 
     [Authorize]
@@ -251,7 +259,7 @@ public class GamePlayController : ControllerBase
     {
         limit = Math.Clamp(limit, 1, 200);
 
-        var totalTasks = await _db.GameTasks.CountAsync(t => t.GameId == gameId);
+        var taskCounts = await GetTaskCounts(gameId);
         var items = await _db.GameAttempts
             .AsNoTracking()
             .Include(a => a.User)
@@ -267,12 +275,48 @@ public class GamePlayController : ControllerBase
                 a.Score,
                 a.MaxScore,
                 a.Answers.Count(x => x.IsCorrect == true),
-                totalTasks
+                taskCounts.Total,
+                taskCounts.Scored,
+                taskCounts.Neutral
             ))
             .Take(limit)
             .ToListAsync();
 
         return Ok(items);
+    }
+
+    [Authorize]
+    [HttpGet("{gameId:guid}/attempts/{attemptId:guid}/review")]
+    public async Task<IActionResult> ReviewAttempt(Guid gameId, Guid attemptId)
+    {
+        var userId = User.GetCurrentUserId();
+        if (userId is null) return Unauthorized();
+
+        var attempt = await LoadAttemptForReview(gameId, attemptId);
+        if (attempt is null) return NotFound();
+        if (!CanReadAttempt(attempt, userId.Value)) return NotFound();
+        if (!IsAttemptFinished(attempt)) return Conflict("Attempt is not finished.");
+
+        return Ok(BuildAttemptReviewDto(attempt));
+    }
+
+    [Authorize]
+    [HttpPost("{gameId:guid}/attempts/{attemptId:guid}/answers/{answerId:guid}/explain")]
+    public async Task<IActionResult> ExplainAnswer(Guid gameId, Guid attemptId, Guid answerId)
+    {
+        var userId = User.GetCurrentUserId();
+        if (userId is null) return Unauthorized();
+
+        var attempt = await LoadAttemptForReview(gameId, attemptId);
+        if (attempt is null) return NotFound();
+        if (!CanReadAttempt(attempt, userId.Value)) return NotFound();
+        if (!IsAttemptFinished(attempt)) return Conflict("Attempt is not finished.");
+
+        var answer = attempt.Answers.FirstOrDefault(a => a.Id == answerId);
+        if (answer is null) return NotFound("Answer not found.");
+
+        var explanation = await _ai.ExplainAnswerAsync(attempt.Game, answer.GameTask, answer, HttpContext.RequestAborted);
+        return Ok(new AiExplainAnswerResponse(explanation));
     }
 
     private static PublicGameTaskDto ToPublicTaskDto(GameTask task) =>
@@ -304,6 +348,106 @@ public class GamePlayController : ControllerBase
         }
 
         return options;
+    }
+
+    private Task<GameAttempt?> LoadAttemptForReview(Guid gameId, Guid attemptId) =>
+        _db.GameAttempts
+            .Include(a => a.Game)
+            .ThenInclude(g => g.Tasks)
+            .ThenInclude(t => t.Options)
+            .Include(a => a.Answers)
+            .ThenInclude(a => a.GameTask)
+            .ThenInclude(t => t.Options)
+            .Include(a => a.User)
+            .FirstOrDefaultAsync(a => a.Id == attemptId && a.GameId == gameId);
+
+    private bool CanReadAttempt(GameAttempt attempt, Guid userId) =>
+        attempt.UserId == userId || attempt.Game.OwnerUserId == userId || User.IsCurrentUserAdmin();
+
+    private static bool IsAttemptFinished(GameAttempt attempt)
+    {
+        var taskCount = attempt.Game.Tasks.Count;
+        return attempt.FinishedAtUtc > attempt.StartedAtUtc || (taskCount > 0 && attempt.Answers.Count >= taskCount);
+    }
+
+    private static AttemptReviewDto BuildAttemptReviewDto(GameAttempt attempt)
+    {
+        var items = attempt.Answers
+            .OrderBy(a => a.GameTask.Order)
+            .Select(BuildAttemptReviewItemDto)
+            .ToList();
+
+        return new AttemptReviewDto(
+            attempt.Id,
+            attempt.GameId,
+            attempt.Game.Title,
+            attempt.Score,
+            attempt.MaxScore,
+            attempt.TotalTimeMs,
+            attempt.StartedAtUtc,
+            attempt.FinishedAtUtc,
+            items
+        );
+    }
+
+    private static AttemptReviewItemDto BuildAttemptReviewItemDto(GameTaskAnswer answer)
+    {
+        var task = answer.GameTask;
+        var options = task.Options
+            .Where(o => o.IsActive)
+            .OrderBy(o => o.SortOrder)
+            .ToList();
+        var optionMap = options.ToDictionary(o => o.Id, o => o.Text);
+        var selectedIds = BuildSelectedOptionIds(answer);
+        var submittedOrderIds = task.Type == GameTaskType.Puzzle ? ParseGuidList(answer.SubmittedOrder) : new List<Guid>();
+        var correctIds = BuildCorrectOptionIds(task, options);
+
+        return new AttemptReviewItemDto(
+            answer.Id,
+            task.Id,
+            task.Type,
+            task.Order,
+            task.Text,
+            task.Points,
+            answer.TimeSpentMs,
+            answer.IsCorrect,
+            options.Select(o => new AttemptReviewOptionDto(o.Id, o.Text)).ToList(),
+            selectedIds,
+            selectedIds.Select(id => optionMap.TryGetValue(id, out var text) ? text : id.ToString()).ToList(),
+            answer.TextAnswer,
+            submittedOrderIds,
+            submittedOrderIds.Select(id => optionMap.TryGetValue(id, out var text) ? text : id.ToString()).ToList(),
+            correctIds,
+            correctIds.Select(id => optionMap.TryGetValue(id, out var text) ? text : id.ToString()).ToList()
+        );
+    }
+
+    private static List<Guid> BuildSelectedOptionIds(GameTaskAnswer answer)
+    {
+        if (answer.SelectedOptionId.HasValue) return new List<Guid> { answer.SelectedOptionId.Value };
+        return answer.GameTask.Type == GameTaskType.Multichoice ? ParseGuidList(answer.SubmittedOrder) : new List<Guid>();
+    }
+
+    private static List<Guid> BuildCorrectOptionIds(GameTask task, List<AnswerOption> options) =>
+        task.Type switch
+        {
+            GameTaskType.Quiz or GameTaskType.TrueFalse => task.CorrectOptionId.HasValue ? new List<Guid> { task.CorrectOptionId.Value } : new List<Guid>(),
+            GameTaskType.Multichoice => options.Where(o => o.IsCorrect).Select(o => o.Id).ToList(),
+            GameTaskType.Puzzle => options.OrderBy(o => o.SortOrder).Select(o => o.Id).ToList(),
+            _ => new List<Guid>()
+        };
+
+    private static List<Guid> ParseGuidList(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return new List<Guid>();
+        try
+        {
+            return JsonSerializer.Deserialize<List<Guid>>(json) ?? new List<Guid>();
+        }
+        catch (JsonException)
+        {
+            return new List<Guid>();
+        }
     }
 
     private record BuiltAnswer(Guid Id, Guid AttemptId, Guid GameTaskId, Guid? SelectedOptionId, string? TextAnswer, string? SubmittedOrder, bool? IsCorrect, int TimeSpentMs);
@@ -402,18 +546,18 @@ public class GamePlayController : ControllerBase
 
     private async Task<AnswerResponse> BuildIntermediateResponse(Guid attemptId, GameTask next, string nextToken, DateTime nextExpUtc, bool? lastAnswerCorrect)
     {
-        var totalTasks = await _db.GameTasks.Where(t => t.GameId == next.GameId).CountAsync();
+        var taskCounts = await GetTaskCounts(next.GameId);
         var correctAnswers = await _db.GameTaskAnswers.Where(x => x.AttemptId == attemptId && x.IsCorrect == true).CountAsync();
         var maxScore = await GetMaxScore(next.GameId);
         var score = await GetAttemptScore(attemptId);
 
-        return new AnswerResponse(false, null, lastAnswerCorrect, score, maxScore, correctAnswers, totalTasks, 0, nextToken, nextExpUtc, ToPublicTaskDto(next));
+        return new AnswerResponse(false, null, lastAnswerCorrect, score, maxScore, correctAnswers, taskCounts.Total, taskCounts.Scored, taskCounts.Neutral, 0, nextToken, nextExpUtc, ToPublicTaskDto(next));
     }
 
     private async Task<AnswerResponse> FinishAttempt(Guid attemptId, string reason, bool? lastAnswerCorrect)
     {
         var attempt = await _db.GameAttempts.FirstAsync(a => a.Id == attemptId);
-        var totalTasks = await _db.GameTasks.Where(t => t.GameId == attempt.GameId).CountAsync();
+        var taskCounts = await GetTaskCounts(attempt.GameId);
         var maxScore = await GetMaxScore(attempt.GameId);
         var correctAnswers = await _db.GameTaskAnswers.Where(x => x.AttemptId == attemptId && x.IsCorrect == true).CountAsync();
         var score = await GetAttemptScore(attemptId);
@@ -426,7 +570,24 @@ public class GamePlayController : ControllerBase
         attempt.TotalTimeMs = (long)Math.Max(0, (now - attempt.StartedAtUtc).TotalMilliseconds);
         await _db.SaveChangesAsync();
 
-        return new AnswerResponse(true, reason, lastAnswerCorrect, attempt.Score, attempt.MaxScore, correctAnswers, totalTasks, attempt.TotalTimeMs, null, null, null);
+        return new AnswerResponse(true, reason, lastAnswerCorrect, attempt.Score, attempt.MaxScore, correctAnswers, taskCounts.Total, taskCounts.Scored, taskCounts.Neutral, attempt.TotalTimeMs, null, null, null);
+    }
+
+    private async Task<(int Total, int Scored, int Neutral)> GetTaskCounts(Guid gameId)
+    {
+        var counts = await _db.GameTasks
+            .Where(t => t.GameId == gameId)
+            .GroupBy(t => 1)
+            .Select(g => new
+            {
+                Total = g.Count(),
+                Scored = g.Count(t => t.Type != GameTaskType.OpenEnded && t.Type != GameTaskType.Poll)
+            })
+            .FirstOrDefaultAsync();
+
+        var total = counts?.Total ?? 0;
+        var scored = counts?.Scored ?? 0;
+        return (total, scored, Math.Max(0, total - scored));
     }
 
     private Task<int> GetMaxScore(Guid gameId) =>

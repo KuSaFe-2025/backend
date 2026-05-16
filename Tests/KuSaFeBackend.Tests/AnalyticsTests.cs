@@ -97,7 +97,9 @@ public class AnalyticsTests
         Assert.Equal(100, item.Score);
         Assert.Equal(100, item.MaxScore);
         Assert.Equal(1, item.CorrectAnswers);
-        Assert.Equal(1, item.TotalTasks);
+        Assert.Equal(3, item.TotalTasks);
+        Assert.Equal(1, item.ScoredTasks);
+        Assert.Equal(2, item.NeutralTasks);
         Assert.True(item.FinishedAtUtc > DateTime.MinValue);
     }
 
@@ -117,6 +119,9 @@ public class AnalyticsTests
         var gameId = Guid.NewGuid();
         var taskId = Guid.NewGuid();
         var optionId = Guid.NewGuid();
+        var openTaskId = Guid.NewGuid();
+        var pollTaskId = Guid.NewGuid();
+        var pollOptionId = Guid.NewGuid();
         var attemptId = Guid.NewGuid();
 
         await app.SeedAsync(db =>
@@ -160,12 +165,40 @@ public class AnalyticsTests
                 Points = 100,
                 TimeLimitMs = 60000
             });
+            db.GameTasks.Add(new GameTask
+            {
+                Id = openTaskId,
+                GameId = gameId,
+                Type = GameTaskType.OpenEnded,
+                Order = 1,
+                Text = "Explain the answer.",
+                Points = 0,
+                TimeLimitMs = 60000
+            });
+            db.GameTasks.Add(new GameTask
+            {
+                Id = pollTaskId,
+                GameId = gameId,
+                Type = GameTaskType.Poll,
+                Order = 2,
+                Text = "Was it useful?",
+                Points = 0,
+                TimeLimitMs = 60000
+            });
 
             db.AnswerOptions.Add(new AnswerOption
             {
                 Id = optionId,
                 GameTaskId = taskId,
                 Text = "4",
+                SortOrder = 0,
+                IsActive = true
+            });
+            db.AnswerOptions.Add(new AnswerOption
+            {
+                Id = pollOptionId,
+                GameTaskId = pollTaskId,
+                Text = "Yes",
                 SortOrder = 0,
                 IsActive = true
             });
@@ -191,6 +224,24 @@ public class AnalyticsTests
                 SelectedOptionId = optionId,
                 IsCorrect = true,
                 TimeSpentMs = 1500
+            });
+            db.GameTaskAnswers.Add(new GameTaskAnswer
+            {
+                Id = Guid.NewGuid(),
+                AttemptId = attemptId,
+                GameTaskId = openTaskId,
+                TextAnswer = "Because it is obvious.",
+                IsCorrect = null,
+                TimeSpentMs = 1000
+            });
+            db.GameTaskAnswers.Add(new GameTaskAnswer
+            {
+                Id = Guid.NewGuid(),
+                AttemptId = attemptId,
+                GameTaskId = pollTaskId,
+                SelectedOptionId = pollOptionId,
+                IsCorrect = null,
+                TimeSpentMs = 800
             });
 
             return Task.CompletedTask;
@@ -292,7 +343,7 @@ public class AnalyticsTests
         return (ownerId, otherUserId, gameId, taskId);
     }
 
-    private record LeaderboardItem(Guid UserId, string DisplayName, long TotalTimeMs, DateTime FinishedAtUtc, int Score, int MaxScore, int CorrectAnswers, int TotalTasks);
+    private record LeaderboardItem(Guid UserId, string DisplayName, long TotalTimeMs, DateTime FinishedAtUtc, int Score, int MaxScore, int CorrectAnswers, int TotalTasks, int ScoredTasks, int NeutralTasks);
 
     private sealed class FakeModerationService : IGameModerationService
     {

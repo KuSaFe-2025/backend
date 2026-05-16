@@ -12,6 +12,7 @@ public interface IAiAssistantService
     Task<string> RewriteAsync(string field, string mode, string text, CancellationToken cancellationToken);
     Task<AiSuggestOptionResponse> SuggestOptionAsync(AiSuggestOptionRequest request, CancellationToken cancellationToken);
     Task<AiSuggestTaskResponse> SuggestTaskAsync(AiSuggestTaskRequest request, CancellationToken cancellationToken);
+    Task<string> ExplainAnswerAsync(Game game, GameTask task, GameTaskAnswer answer, CancellationToken cancellationToken);
 }
 
 public class OllamaAiAssistantService : IAiAssistantService
@@ -81,6 +82,28 @@ public class OllamaAiAssistantService : IAiAssistantService
         ) ?? throw new InvalidOperationException("Не удалось разобрать ответ AI для новой задачи.");
     }
 
+    public async Task<string> ExplainAnswerAsync(Game game, GameTask task, GameTaskAnswer answer, CancellationToken cancellationToken)
+    {
+        var prompt = new StringBuilder()
+            .AppendLine("Ты объясняешь результат прохождения образовательной игры KuSaFe.")
+            .AppendLine("Ответь на русском языке кратко: 1-3 предложения.")
+            .AppendLine("Объясни именно почему правильный ответ является правильным. Не оценивай пользователя и не используй Markdown.")
+            .AppendLine()
+            .AppendLine("Полное содержимое игры:")
+            .AppendLine($"Название: {game.Title}")
+            .AppendLine($"Описание: {game.Description}")
+            .AppendLine("Задания:")
+            .AppendLine(BuildGameSnapshot(game))
+            .AppendLine()
+            .AppendLine("Текущее задание:")
+            .AppendLine(BuildTaskSnapshot(task))
+            .AppendLine($"Ответ пользователя: {DescribeSubmittedAnswer(task, answer)}")
+            .AppendLine($"Правильный ответ: {DescribeCorrectAnswer(task)}")
+            .ToString();
+
+        return (await AskOllama(prompt, cancellationToken)).Trim();
+    }
+
     private async Task<string> AskOllama(string prompt, CancellationToken cancellationToken)
     {
         var model = _cfg["Ai:Model"] ?? _cfg["Moderation:Model"] ?? "llama3.1:8b";
@@ -139,6 +162,83 @@ public class OllamaAiAssistantService : IAiAssistantService
         _ => mode
     };
 
+    private static string BuildGameSnapshot(Game game) =>
+        string.Join("\n", game.Tasks.OrderBy(t => t.Order).Select(BuildTaskSnapshot));
+
+    private static string BuildTaskSnapshot(GameTask task)
+    {
+        var options = task.Options
+            .Where(o => o.IsActive)
+            .OrderBy(o => o.SortOrder)
+            .Select(o => $"- {o.Text}{(IsCorrectOption(task, o) ? " (правильный)" : "")}");
+
+        return new StringBuilder()
+            .AppendLine($"{task.Order + 1}. Тип: {task.Type}. Текст: {task.Text}")
+            .AppendLine($"Варианты:\n{string.Join("\n", options)}")
+            .ToString()
+            .Trim();
+    }
+
+    private static string DescribeSubmittedAnswer(GameTask task, GameTaskAnswer answer)
+    {
+        var optionMap = task.Options.ToDictionary(o => o.Id, o => o.Text);
+
+        if (answer.SelectedOptionId.HasValue && optionMap.TryGetValue(answer.SelectedOptionId.Value, out var selected))
+            return selected;
+
+        if (!string.IsNullOrWhiteSpace(answer.TextAnswer))
+            return answer.TextAnswer;
+
+        var ordered = ParseGuidList(answer.SubmittedOrder);
+        if (ordered.Count > 0)
+            return string.Join(" -> ", ordered.Select(id => optionMap.TryGetValue(id, out var text) ? text : id.ToString()));
+
+        return "не указан";
+    }
+
+    private static string DescribeCorrectAnswer(GameTask task)
+    {
+        var correctOptions = task.Options.Where(o => o.IsActive && IsCorrectOption(task, o));
+        var correct = (task.Type == GameTaskType.Puzzle
+                ? correctOptions.OrderBy(o => o.SortOrder)
+                : correctOptions.OrderBy(o => o.Text))
+            .Select(o => o.Text)
+            .ToList();
+
+        if (task.Type == GameTaskType.Puzzle && correct.Count > 0)
+            return string.Join(" -> ", correct);
+
+        if (correct.Count > 0)
+            return string.Join(", ", correct);
+
+        if (!string.IsNullOrWhiteSpace(task.OpenEndedAcceptedAnswer))
+            return task.OpenEndedAcceptedAnswer;
+
+        return task.Type == GameTaskType.Poll ? "у опроса нет правильного ответа" : "не задан";
+    }
+
+    private static bool IsCorrectOption(GameTask task, AnswerOption option) =>
+        task.Type switch
+        {
+            GameTaskType.Quiz or GameTaskType.TrueFalse => option.Id == task.CorrectOptionId,
+            GameTaskType.Multichoice => option.IsCorrect,
+            GameTaskType.Puzzle => true,
+            _ => false
+        };
+
+    private static List<Guid> ParseGuidList(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return new List<Guid>();
+        try
+        {
+            return JsonSerializer.Deserialize<List<Guid>>(json) ?? new List<Guid>();
+        }
+        catch (JsonException)
+        {
+            return new List<Guid>();
+        }
+    }
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private record OllamaGenerateRequest(string Model, string Prompt, bool Stream);
@@ -177,4 +277,7 @@ public class DeterministicAiAssistantService : IAiAssistantService
             new List<int> { 0 }
         ));
     }
+
+    public Task<string> ExplainAnswerAsync(Game game, GameTask task, GameTaskAnswer answer, CancellationToken cancellationToken) =>
+        Task.FromResult("Правильный ответ выбран потому, что он соответствует условию задания.");
 }

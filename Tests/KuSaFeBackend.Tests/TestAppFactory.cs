@@ -5,9 +5,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.EntityFrameworkCore.Sqlite;
 using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace KuSaFeBackend.Tests;
 
@@ -34,6 +32,8 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>, IAsyncDispo
                 ["Jwt:Audience"] = "kusafe-tests",
                 ["Jwt:AccessMinutes"] = "15",
                 ["Jwt:RefreshDays"] = "30",
+                ["Database:Provider"] = "Sqlite",
+                ["ConnectionStrings:DefaultConnection"] = "DataSource=:memory:",
                 ["Moderation:OllamaBaseUrl"] = "http://localhost:11434",
                 ["Moderation:Model"] = "llama3.1:8b",
                 ["Moderation:Votes"] = "5"
@@ -43,11 +43,7 @@ public sealed class TestAppFactory : WebApplicationFactory<Program>, IAsyncDispo
 
         builder.ConfigureServices(services =>
         {
-            // убираем реальную БД, подменяем на SQLite in-memory
-            var dbOpt = services.SingleOrDefault(d => d.ServiceType == typeof(DbContextOptions<AppDbContext>));
-            if (dbOpt != null) services.Remove(dbOpt);
-
-            services.AddDbContext<AppDbContext>(opt => opt.UseSqlite(_connection));
+            services.AddSingleton(_connection);
             _configureTestServices?.Invoke(services);
 
             _connection.Open();

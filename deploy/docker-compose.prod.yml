@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kusafe-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-kusafe_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-kusafe_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: kusafe-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+
+  backend:
+    image: ghcr.io/kusafe-2025/backend:${BACKEND_TAG:-main}
+    container_name: kusafe-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:5000
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB:-kusafe_db};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD}
+      Jwt__Key: ${JWT_KEY}
+      Jwt__Issuer: KuSaFeBackend
+      Jwt__Audience: KuSaFeFrontend
+      Moderation__OllamaBaseUrl: http://ollama:11434
+      Ai__OllamaBaseUrl: http://ollama:11434
+      Moderation__Model: ${OLLAMA_MODEL:-llama3.1:8b}
+      Ai__Model: ${OLLAMA_MODEL:-llama3.1:8b}
+    expose:
+      - "5000"
+    ports:
+      - "127.0.0.1:5000:5000"
+
+  frontend:
+    image: ghcr.io/kusafe-2025/frontend:${FRONTEND_TAG:-main}
+    container_name: kusafe-frontend
+    restart: unless-stopped
+    expose:
+      - "80"
+    ports:
+      - "127.0.0.1:5549:80"
+
+volumes:
+  postgres_data:
+  ollama_data:
