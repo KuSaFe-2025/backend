@@ -1,0 +1,82 @@
+# Local development stack — builds images from sources in this repo.
+# Use:    docker compose -f docker-compose.local.yml up --build
+# Stop:   docker compose -f docker-compose.local.yml down
+#
+# This file is intentionally separate from deploy/docker-compose.prod.yml,
+# which pulls pre-built images from GHCR.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: kusafe_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: supersecretpassword1
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d kusafe_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    # If you don't want to pull an LLM weights file (~5GB), set PROVIDER=deterministic
+    # on the two Python services below and remove this dependency.
+
+  ai-assistant-service:
+    build:
+      context: ./ai-assistant-service
+    environment:
+      PROVIDER: ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: llama3.1:8b
+      LOG_LEVEL: INFO
+    depends_on:
+      - ollama
+    ports:
+      - "127.0.0.1:8001:8000"
+
+  game-moderation-service:
+    build:
+      context: ./game-moderation-service
+    environment:
+      PROVIDER: ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: llama3.1:8b
+      MODERATION_VOTES: "5"
+      LOG_LEVEL: INFO
+    depends_on:
+      - ollama
+    ports:
+      - "127.0.0.1:8002:8000"
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:5000
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=kusafe_db;Username=postgres;Password=supersecretpassword1
+      Jwt__Key: dev_secretkey_abcsecretkey_abcsecretkey_abcsecretkey_abcsecretkey_abc
+      Jwt__Issuer: KuSaFeBackend
+      Jwt__Audience: KuSaFeFrontend
+      Ai__BaseUrl: http://ai-assistant-service:8000
+      Moderation__BaseUrl: http://game-moderation-service:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ai-assistant-service:
+        condition: service_started
+      game-moderation-service:
+        condition: service_started
+    ports:
+      - "127.0.0.1:5000:5000"
+
+volumes:
+  postgres_data:
+  ollama_data:
