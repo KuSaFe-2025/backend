@@ -1,100 +1,172 @@
 # KuSaFe Backend
 
-ASP.NET Core 10 backend для платформы KuSaFe: создание образовательных игр, прохождение заданий, лидерборды, отзывы, статистика, AI-модерация и AI-инструменты автора. Разработка Николая Кушнаренко, Андрея Самохвалова и Арсения Фёдорова.
+ASP.NET Core 10 backend for the **KuSaFe** educational-game platform, plus two
+Python microservices that own the AI features.
 
-## Возможности
+## Architecture
 
-- JWT-аутентификация с access/refresh токенами.
-- Роли пользователей и админ-доступ через claim `isAdmin`.
-- CRUD игр и заданий для автора.
-- Типы заданий: викторина, верно/неверно, порядок, открытый ответ, опрос, множественный выбор.
-- Приватные игры по ссылке, лимит попыток на пользователя, окна доступности по датам.
-- Проверка игры локальной AI-модерацией через Ollama или deterministic provider для E2E.
-- AI-инструменты автора: переписывание текста, генерация неправильного варианта ответа, генерация новой задачи.
-- AI-объяснение правильного ответа после прохождения игры.
-- Публичный каталог, рекомендуемые игры, рейтинг и количество прохождений.
-- Лидерборд идеальных попыток.
-- Отзывы к платформе и играм, скрытие отзывов приватных игр от публичного списка.
-- Статистика автора: средний балл, время, точность, CSV export, пагинация открытых ответов.
-
-## Локальный запуск
-
-```bash
-dotnet restore KuSaFeBackend.sln
-dotnet build KuSaFeBackend.sln
-dotnet run --project KuSaFeBackend.csproj --urls http://127.0.0.1:5267
+```
+                    ┌──────────────────────┐
+                    │  Frontend (React)    │
+                    └──────────┬───────────┘
+                               │ HTTP — contracts unchanged
+                               ▼
+                    ┌──────────────────────┐
+                    │ C# Backend  :5000    │
+                    │ Controllers / Auth   │
+                    │ Postgres / Stream    │
+                    └────┬───────────┬─────┘
+                         │           │
+            HTTP (internal docker network)
+                         │           │
+        ┌────────────────▼──┐   ┌────▼──────────────────┐
+        │ ai-assistant-     │   │ game-moderation-      │
+        │ service           │   │ service               │
+        │ FastAPI :8000     │   │ FastAPI :8000         │
+        └────────────────┬──┘   └────┬──────────────────┘
+                         │           │
+                         └─────┬─────┘
+                               ▼
+                    ┌──────────────────────┐
+                    │  Ollama :11434       │
+                    └──────────────────────┘
 ```
 
-По умолчанию используется PostgreSQL из `appsettings.json`.
+### What moved
 
-Важные переменные:
+The AI features that used to live in C# (`Services/AiAssistantService.cs`,
+`Services/GameModerationService.cs`) are now implemented in Python and run as
+independent microservices. The C# backend keeps the same public HTTP contract
+toward the frontend; internally, it proxies AI calls to the Python services.
 
-- `ConnectionStrings__DefaultConnection`
-- `Jwt__Key`
-- `Jwt__Issuer`
-- `Jwt__Audience`
-- `Moderation__Provider`: `Ollama` или `Deterministic`
-- `Moderation__OllamaBaseUrl`
-- `Ai__Provider`: `Ollama` или `Deterministic`
-- `Ai__OllamaBaseUrl`
+**Frontend wasn't touched. JWT/auth/CORS/E2E tests all keep working.**
 
-## Тесты
+| Capability                  | Owner                        | Endpoint exposed to FE                                                |
+| --------------------------- | ---------------------------- | --------------------------------------------------------------------- |
+| Game moderation (vote-based)| `game-moderation-service`    | `POST /v1/my/games/{id}/submit-for-verification` (on C#)             |
+| Rewrite text (RU)           | `ai-assistant-service`       | `POST /v1/my/games/{id}/ai/rewrite/stream` (streaming on C#)         |
+| Suggest a wrong answer      | `ai-assistant-service`       | `POST /v1/my/games/{id}/ai/suggest-option`                            |
+| Suggest a new task          | `ai-assistant-service`       | `POST /v1/my/games/{id}/ai/suggest-task`                              |
+| Explain the correct answer  | `ai-assistant-service`       | `POST /v1/games/{id}/attempts/{aid}/answers/{ansid}/explain`         |
+
+The C# service classes still exist as thin proxies:
+`Services/AiAssistantService.cs::RemoteAiAssistantService` and
+`Services/GameModerationService.cs::RemoteGameModerationService`. The
+`Deterministic*` variants are kept for the existing E2E tests so CI without
+Ollama still works.
+
+## Repository layout
+
+```
+.
+├── KuSaFeBackend.csproj            # ASP.NET Core project
+├── Program.cs                       # DI wiring (registers Remote* by default)
+├── Controllers/                     # unchanged
+├── Services/
+│   ├── AiAssistantService.cs        # interface + RemoteAiAssistantService + Deterministic
+│   └── GameModerationService.cs     # interface + RemoteGameModerationService + Deterministic
+├── Tests/                           # C# tests (unchanged)
+│
+├── ai-assistant-service/            # NEW — Python microservice
+│   ├── app/{main,schemas,prompts,providers}.py
+│   ├── tests/                       # pytest suite
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── README.md
+│
+├── game-moderation-service/         # NEW — Python microservice
+│   ├── app/{main,schemas,prompts,providers}.py
+│   ├── tests/                       # pytest suite
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── README.md
+│
+├── deploy/
+│   ├── docker-compose.prod.yml      # updated: 6 services now
+│   └── .env.example
+│
+├── docker-compose.local.yml         # NEW — builds everything from sources
+└── .github/workflows/ci-cd.yml      # 3 test jobs + 3 image builds + deploy
+```
+
+## Run the full stack locally
+
+The fastest path uses Docker Compose and rebuilds everything from sources:
+
+```bash
+docker compose -f docker-compose.local.yml up --build
+```
+
+This brings up Postgres, Ollama, both Python microservices, and the C# backend.
+Once it's up, point your frontend dev server at `http://localhost:5000`
+(set `VITE_API_BASE_URL=http://localhost:5000` in `frontend/.env`).
+
+> **Ollama models are not bundled.** After the first start, pull the model:
+> ```bash
+> docker exec kusafe-ollama ollama pull llama3.1:8b
+> ```
+> If you don't want to download ~5 GB of weights, run the Python services in
+> deterministic mode instead — see the snippet under "Run microservices alone".
+
+## Run microservices alone (no Docker)
+
+```bash
+# Terminal 1
+cd ai-assistant-service
+pip install -r requirements.txt
+PROVIDER=deterministic uvicorn app.main:app --port 8001 --reload
+
+# Terminal 2
+cd game-moderation-service
+pip install -r requirements.txt
+PROVIDER=deterministic uvicorn app.main:app --port 8002 --reload
+```
+
+Then run the C# backend with these env vars so it points to your local Python
+services:
+
+```bash
+export Ai__BaseUrl=http://localhost:8001
+export Moderation__BaseUrl=http://localhost:8002
+dotnet run --project KuSaFeBackend.csproj
+```
+
+## Tests
+
+### Python microservices
+
+```bash
+cd ai-assistant-service && PYTHONPATH=. pytest -q          # 29 tests
+cd game-moderation-service && PYTHONPATH=. pytest -q       # 20 tests
+```
+
+Both suites are hermetic — no Ollama, no network. CI runs them on every push
+and PR (see `.github/workflows/ci-cd.yml`).
+
+### C# backend
 
 ```bash
 dotnet test Tests/KuSaFeBackend.Tests/KuSaFeBackend.Tests.csproj
 ```
 
-Тестовый backend может работать с SQLite и deterministic AI, чтобы проверки не зависели от реального Ollama.
+The existing `ModerationTests` / `AnalyticsTests` mock out the moderation
+service via DI, so they don't care about the new architecture.
 
-## Docker
+## Configuration
 
-```bash
-docker build -t kusafe-backend .
-docker run --rm -p 5000:5000 \
-  -e ASPNETCORE_ENVIRONMENT=Production \
-  -e ASPNETCORE_URLS=http://+:5000 \
-  -e ConnectionStrings__DefaultConnection="Host=host.docker.internal;Port=5432;Database=kusafe_db;Username=postgres;Password=postgres" \
-  -e Jwt__Key="replace-with-long-secret" \
-  kusafe-backend
-```
+All AI- and moderation-related settings live behind two new C# config keys:
 
-Production compose и nginx-конфиг лежат во frontend repository в `deploy/`, потому что там расположен edge nginx для всего сайта.
+| Key                                           | Default                                  |
+| --------------------------------------------- | ---------------------------------------- |
+| `Ai:BaseUrl`                                  | `http://ai-assistant-service:8000`       |
+| `Moderation:BaseUrl`                          | `http://game-moderation-service:8000`    |
+| `Ai:Provider` = `Deterministic`               | Skip the network, use offline fallback   |
+| `Moderation:Provider` = `Deterministic`       | Skip the network, use offline fallback   |
 
-## CI/CD
+The Python services in turn take their own env vars (see each service's
+README) — typically `PROVIDER`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`,
+`MODERATION_VOTES`.
 
-GitHub Actions workflow `.github/workflows/ci-cd.yml` делает:
+## How to push a branch and trigger CI/CD
 
-- `dotnet restore`;
-- `dotnet build`;
-- `dotnet test`;
-- сборку Docker image;
-- push в GHCR как `ghcr.io/kusafe-2025/backend:<branch>` и `<sha>`;
-- SSH deploy на Ubuntu 22.04 в `/opt/kusafe`;
-- авторизацию сервера в private GHCR через `GHCR_READ_USER` и `GHCR_READ_TOKEN`;
-- bootstrap `/opt/kusafe`, `.env` и `docker-compose.prod.yml` для первого деплоя;
-- `docker compose pull backend`;
-- `docker compose up -d postgres ollama backend`;
-- healthcheck `/v1/health`.
-
-Нужные secrets:
-
-- `DEPLOY_HOST`
-- `DEPLOY_USER`
-- `DEPLOY_SSH_KEY`
-- `DEPLOY_PORT`
-- `PROD_POSTGRES_PASSWORD`
-- `PROD_JWT_KEY`
-- `GHCR_READ_USER`
-- `GHCR_READ_TOKEN`
-
-`GHCR_READ_TOKEN` должен иметь минимум `read:packages`. Для push workflow использует стандартный `GITHUB_TOKEN`.
-
-## Production
-
-Ожидаемая схема:
-
-- `nginx` принимает `80/443`;
-- системный nginx на Ubuntu проксирует `/api/` на `127.0.0.1:5000`;
-- frontend container доступен системному nginx на `127.0.0.1:5549`;
-- PostgreSQL работает в Docker volume;
-- Ollama работает в Docker volume и доступна backend по `http://ollama:11434`.
+See [`PUSHING-TO-GIT.md`](./PUSHING-TO-GIT.md) for the step-by-step guide.

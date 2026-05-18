@@ -22,6 +22,37 @@ services:
     volumes:
       - ollama_data:/root/.ollama
 
+  ai-assistant-service:
+    image: ghcr.io/kusafe-2025/ai-assistant-service:${AI_ASSISTANT_TAG:-main}
+    container_name: kusafe-ai-assistant
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_started
+    environment:
+      PROVIDER: ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+      LOG_LEVEL: INFO
+    expose:
+      - "8000"
+
+  game-moderation-service:
+    image: ghcr.io/kusafe-2025/game-moderation-service:${GAME_MODERATION_TAG:-main}
+    container_name: kusafe-game-moderation
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_started
+    environment:
+      PROVIDER: ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+      MODERATION_VOTES: ${MODERATION_VOTES:-5}
+      LOG_LEVEL: INFO
+    expose:
+      - "8000"
+
   backend:
     image: ghcr.io/kusafe-2025/backend:${BACKEND_TAG:-main}
     container_name: kusafe-backend
@@ -29,7 +60,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      ollama:
+      ai-assistant-service:
+        condition: service_started
+      game-moderation-service:
         condition: service_started
     environment:
       ASPNETCORE_ENVIRONMENT: Production
@@ -38,10 +71,8 @@ services:
       Jwt__Key: ${JWT_KEY}
       Jwt__Issuer: KuSaFeBackend
       Jwt__Audience: KuSaFeFrontend
-      Moderation__OllamaBaseUrl: http://ollama:11434
-      Ai__OllamaBaseUrl: http://ollama:11434
-      Moderation__Model: ${OLLAMA_MODEL:-llama3.1:8b}
-      Ai__Model: ${OLLAMA_MODEL:-llama3.1:8b}
+      Ai__BaseUrl: http://ai-assistant-service:8000
+      Moderation__BaseUrl: http://game-moderation-service:8000
     expose:
       - "5000"
     ports:

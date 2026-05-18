@@ -1,8 +1,7 @@
 using System.Net.Http.Json;
-using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using KuSaFeBackend.Models;
-using Microsoft.EntityFrameworkCore;
 
 namespace KuSaFeBackend.Services;
 
@@ -13,96 +12,83 @@ public interface IGameModerationService
     Task<GameModerationResult> ModerateAsync(Game game, CancellationToken cancellationToken);
 }
 
-public class OllamaGameModerationService : IGameModerationService
+/// <summary>
+/// Thin proxy to the Python `game-moderation-service` microservice.
+/// All prompt-building, voting logic and Ollama interaction is owned by the Python service.
+/// </summary>
+public class RemoteGameModerationService : IGameModerationService
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly HttpClient _http;
-    private readonly IConfiguration _cfg;
 
-    public OllamaGameModerationService(HttpClient http, IConfiguration cfg)
+    public RemoteGameModerationService(HttpClient http)
     {
         _http = http;
-        _cfg = cfg;
     }
 
     public async Task<GameModerationResult> ModerateAsync(Game game, CancellationToken cancellationToken)
     {
-        var votes = Math.Max(1, int.TryParse(_cfg["Moderation:Votes"], out var configuredVotes) ? configuredVotes : 5);
-        var model = _cfg["Moderation:Model"] ?? "llama3.1:8b";
-        var prompt = BuildPrompt(game);
-        var yes = 0;
-        var no = 0;
-        var rejectionReasons = new List<string>();
+        var body = new ModerateRequestDto(ToWireGame(game));
+        var response = await _http.PostAsJsonAsync("/v1/moderate", body, JsonOptions, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        var parsed = await response.Content.ReadFromJsonAsync<ModerateResponseDto>(JsonOptions, cancellationToken)
+            ?? throw new InvalidOperationException("Empty response from game-moderation-service.");
 
-        for (var i = 0; i < votes; i++)
-        {
-            var response = await AskOllama(model, prompt, cancellationToken);
-            if (response.Trim().StartsWith("YES", StringComparison.OrdinalIgnoreCase))
-            {
-                yes++;
-            }
-            else
-            {
-                no++;
-                rejectionReasons.Add(ExtractReason(response));
-            }
-        }
-
-        var approved = yes > no;
-        var decision = approved
-            ? $"Approved by local AI moderation ({yes}/{votes} YES)."
-            : $"Rejected by local AI moderation ({no}/{votes} NO). Reason: {FirstNonEmptyReason(rejectionReasons)}";
-
-        return new GameModerationResult(approved, yes, no, decision);
+        return new GameModerationResult(
+            parsed.Approved,
+            parsed.YesVotes,
+            parsed.NoVotes,
+            parsed.Decision ?? "No decision provided.");
     }
 
-    private async Task<string> AskOllama(string model, string prompt, CancellationToken cancellationToken)
-    {
-        var resp = await _http.PostAsJsonAsync("/api/generate", new OllamaGenerateRequest(model, prompt, false), cancellationToken);
-        resp.EnsureSuccessStatusCode();
-        var body = await resp.Content.ReadFromJsonAsync<OllamaGenerateResponse>(cancellationToken: cancellationToken);
-        return body?.Response ?? "NO";
-    }
+    private static GameWireDto ToWireGame(Game game) => new(
+        Title: game.Title,
+        Description: game.Description,
+        Tasks: game.Tasks
+            .OrderBy(t => t.Order)
+            .Select(t => new TaskWireDto(
+                Order: t.Order,
+                Type: (int)t.Type,
+                Text: t.Text,
+                Options: t.Options
+                    .Where(o => o.IsActive)
+                    .OrderBy(o => o.SortOrder)
+                    .Select(o => new OptionWireDto(o.Text, o.IsActive, o.SortOrder))
+                    .ToList()
+            ))
+            .ToList()
+    );
 
-    private static string BuildPrompt(Game game)
-    {
-        var content = new StringBuilder();
-        content.AppendLine("You are moderating a user-created educational game.");
-        content.AppendLine("Return exactly YES: followed by one short sentence if this content is safe for a public educational platform.");
-        content.AppendLine("Return exactly NO: followed by one short sentence if it contains prohibited, hateful, sexual, violent, illegal, or otherwise unsafe content.");
-        content.AppendLine();
-        content.AppendLine($"Title: {game.Title}");
-        content.AppendLine($"Description: {game.Description}");
-        content.AppendLine("Tasks:");
+    // ---- Wire DTOs ----
+    private record OptionWireDto(
+        [property: JsonPropertyName("text")] string Text,
+        [property: JsonPropertyName("isActive")] bool IsActive,
+        [property: JsonPropertyName("sortOrder")] int SortOrder);
 
-        foreach (var task in game.Tasks.OrderBy(t => t.Order))
-        {
-            content.AppendLine($"- Type: {task.Type}; Text: {task.Text}");
-            var options = task.Options.Where(o => o.IsActive).OrderBy(o => o.SortOrder).Select(o => o.Text);
-            content.AppendLine($"  Options: {string.Join("; ", options)}");
-        }
+    private record TaskWireDto(
+        [property: JsonPropertyName("order")] int Order,
+        [property: JsonPropertyName("type")] int Type,
+        [property: JsonPropertyName("text")] string Text,
+        [property: JsonPropertyName("options")] List<OptionWireDto> Options);
 
-        return content.ToString();
-    }
+    private record GameWireDto(
+        [property: JsonPropertyName("title")] string Title,
+        [property: JsonPropertyName("description")] string? Description,
+        [property: JsonPropertyName("tasks")] List<TaskWireDto> Tasks);
 
-    private record OllamaGenerateRequest(string Model, string Prompt, bool Stream);
+    private record ModerateRequestDto([property: JsonPropertyName("game")] GameWireDto Game);
 
-    private record OllamaGenerateResponse([property: JsonPropertyName("response")] string Response);
-
-    private static string ExtractReason(string response)
-    {
-        var trimmed = response.Trim();
-        var colon = trimmed.IndexOf(':');
-        var reason = colon >= 0 ? trimmed[(colon + 1)..].Trim() : trimmed;
-        if (reason.StartsWith("NO", StringComparison.OrdinalIgnoreCase)) reason = reason[2..].Trim();
-        if (string.IsNullOrWhiteSpace(reason)) return "The content did not meet KuSaFe safety rules.";
-        var sentenceEnd = reason.IndexOfAny(new[] { '.', '!', '?' });
-        return sentenceEnd >= 0 ? reason[..(sentenceEnd + 1)].Trim() : reason.Trim();
-    }
-
-    private static string FirstNonEmptyReason(IEnumerable<string> reasons) =>
-        reasons.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r)) ?? "The content did not meet KuSaFe safety rules.";
+    private record ModerateResponseDto(
+        [property: JsonPropertyName("approved")] bool Approved,
+        [property: JsonPropertyName("yesVotes")] int YesVotes,
+        [property: JsonPropertyName("noVotes")] int NoVotes,
+        [property: JsonPropertyName("decision")] string? Decision);
 }
 
+/// <summary>
+/// Offline fallback used in E2E tests and CI when the Python microservice is unavailable.
+/// Kept identical to the previous behaviour.
+/// </summary>
 public class DeterministicGameModerationService : IGameModerationService
 {
     public Task<GameModerationResult> ModerateAsync(Game game, CancellationToken cancellationToken)

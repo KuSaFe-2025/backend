@@ -1,5 +1,4 @@
 using System.Net.Http.Json;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using KuSaFeBackend.Contracts;
@@ -7,6 +6,10 @@ using KuSaFeBackend.Models;
 
 namespace KuSaFeBackend.Services;
 
+/// <summary>
+/// Calls AI features. Implementations: <see cref="RemoteAiAssistantService"/> (Python microservice)
+/// and <see cref="DeterministicAiAssistantService"/> (offline fallback for E2E).
+/// </summary>
 public interface IAiAssistantService
 {
     Task<string> RewriteAsync(string field, string mode, string text, CancellationToken cancellationToken);
@@ -15,236 +18,195 @@ public interface IAiAssistantService
     Task<string> ExplainAnswerAsync(Game game, GameTask task, GameTaskAnswer answer, CancellationToken cancellationToken);
 }
 
-public class OllamaAiAssistantService : IAiAssistantService
+/// <summary>
+/// Thin proxy to the Python `ai-assistant-service` microservice.
+/// All prompt-building, JSON repair and Ollama interaction is owned by the Python service.
+/// This class only maps domain models to the wire DTOs the microservice expects.
+/// </summary>
+public class RemoteAiAssistantService : IAiAssistantService
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly HttpClient _http;
-    private readonly IConfiguration _cfg;
 
-    public OllamaAiAssistantService(HttpClient http, IConfiguration cfg)
+    public RemoteAiAssistantService(HttpClient http)
     {
         _http = http;
-        _cfg = cfg;
     }
 
     public async Task<string> RewriteAsync(string field, string mode, string text, CancellationToken cancellationToken)
     {
-        var prompt = new StringBuilder()
-            .AppendLine("Ты помогаешь автору образовательной игры KuSaFe.")
-            .AppendLine("Верни только переписанный русский текст без пояснений и Markdown-оберток.")
-            .AppendLine($"Поле: {field}")
-            .AppendLine($"Действие: {NormalizeRewriteMode(mode)}")
-            .AppendLine("Исходный текст:")
-            .AppendLine(text)
-            .ToString();
-
-        return (await AskOllama(prompt, cancellationToken)).Trim();
+        var body = new RewriteRequestDto(field, mode, text);
+        var response = await PostAsync<RewriteRequestDto, RewriteResponseDto>("/v1/rewrite", body, cancellationToken);
+        return response.Text ?? string.Empty;
     }
 
     public async Task<AiSuggestOptionResponse> SuggestOptionAsync(AiSuggestOptionRequest request, CancellationToken cancellationToken)
     {
-        var prompt = new StringBuilder()
-            .AppendLine("Ты придумываешь вариант ответа для образовательной игры KuSaFe.")
-            .AppendLine("Верни JSON строго вида {\"text\":\"...\"}. Никаких пояснений.")
-            .AppendLine("Пиши на русском языке. Не повторяй существующие варианты.")
-            .AppendLine("Важно: предложи именно НЕПРАВИЛЬНЫЙ, но правдоподобный вариант ответа. Не возвращай правильный ответ.")
-            .AppendLine($"Название игры: {request.Game.Title}")
-            .AppendLine($"Описание игры: {request.Game.Description}")
-            .AppendLine($"Текст задачи: {request.Task.Text}")
-            .AppendLine($"Тип задачи: {request.Task.Type}")
-            .AppendLine($"Текущие варианты: {string.Join("; ", request.Task.Options ?? new List<string>())}")
-            .ToString();
+        var body = new SuggestOptionRequestDto(
+            Game: new GameSnapshotDto(request.Game.Title, request.Game.Description),
+            Task: new TaskSnapshotDto(
+                Text: request.Task.Text,
+                Type: (int)request.Task.Type,
+                Options: request.Task.Options ?? new List<string>()
+            )
+        );
 
-        return await ParseWithRetries(
-            () => AskOllama(prompt, cancellationToken),
-            json => JsonSerializer.Deserialize<AiSuggestOptionResponse>(json, JsonOptions),
-            result => result is not null && !string.IsNullOrWhiteSpace(result.Text)
-        ) ?? throw new InvalidOperationException("Не удалось разобрать ответ AI для нового варианта.");
+        var response = await PostAsync<SuggestOptionRequestDto, SuggestOptionResponseDto>(
+            "/v1/suggest-option", body, cancellationToken);
+
+        if (string.IsNullOrWhiteSpace(response.Text))
+            throw new InvalidOperationException("Не удалось разобрать ответ AI для нового варианта.");
+
+        return new AiSuggestOptionResponse(response.Text!);
     }
 
     public async Task<AiSuggestTaskResponse> SuggestTaskAsync(AiSuggestTaskRequest request, CancellationToken cancellationToken)
     {
-        var prompt = new StringBuilder()
-            .AppendLine("Ты придумываешь новую задачу для образовательной игры KuSaFe.")
-            .AppendLine("Верни JSON строго вида {\"type\":0,\"text\":\"...\",\"points\":100,\"timeLimitMs\":60000,\"options\":[\"...\",\"...\"],\"correctOptionIndexes\":[0]}.")
-            .AppendLine("type: 0 викторина, 1 верно/неверно, 2 порядок, 3 открытый ответ, 4 опрос, 5 множественный выбор.")
-            .AppendLine("Если вопрос ожидает один правильный вариант ответа, используй type 0 (викторина), а не type 5. Используй type 5 только когда нужно выбрать несколько правильных вариантов одновременно.")
-            .AppendLine("Пиши на русском языке. Никаких пояснений вне JSON.")
-            .AppendLine($"Название игры: {request.Game.Title}")
-            .AppendLine($"Описание игры: {request.Game.Description}")
-            .AppendLine("Уже существующие задачи:")
-            .AppendLine(string.Join("\n", request.Tasks.Select(t => $"- {t.Type}: {t.Text}")))
-            .ToString();
+        var body = new SuggestTaskRequestDto(
+            Game: new GameSnapshotDto(request.Game.Title, request.Game.Description),
+            Tasks: (request.Tasks ?? new List<GameTaskUpsertRequest>())
+                .Select(t => new TaskSummaryDto((int)t.Type, t.Text))
+                .ToList()
+        );
 
-        return await ParseWithRetries(
-            () => AskOllama(prompt, cancellationToken),
-            json => JsonSerializer.Deserialize<AiSuggestTaskResponse>(json, JsonOptions),
-            IsValidTaskSuggestion
-        ) ?? throw new InvalidOperationException("Не удалось разобрать ответ AI для новой задачи.");
+        var response = await PostAsync<SuggestTaskRequestDto, SuggestTaskResponseDto>(
+            "/v1/suggest-task", body, cancellationToken);
+
+        if (response is null || string.IsNullOrWhiteSpace(response.Text))
+            throw new InvalidOperationException("Не удалось разобрать ответ AI для новой задачи.");
+
+        return new AiSuggestTaskResponse(
+            (GameTaskType)response.Type,
+            response.Text!,
+            response.Points,
+            response.TimeLimitMs,
+            response.Options ?? new List<string>(),
+            response.CorrectOptionIndexes ?? new List<int>()
+        );
     }
 
     public async Task<string> ExplainAnswerAsync(Game game, GameTask task, GameTaskAnswer answer, CancellationToken cancellationToken)
     {
-        var prompt = new StringBuilder()
-            .AppendLine("Ты объясняешь результат прохождения образовательной игры KuSaFe.")
-            .AppendLine("Ответь на русском языке кратко: 1-3 предложения.")
-            .AppendLine("Объясни именно почему правильный ответ является правильным. Не оценивай пользователя и не используй Markdown.")
-            .AppendLine()
-            .AppendLine("Полное содержимое игры:")
-            .AppendLine($"Название: {game.Title}")
-            .AppendLine($"Описание: {game.Description}")
-            .AppendLine("Задания:")
-            .AppendLine(BuildGameSnapshot(game))
-            .AppendLine()
-            .AppendLine("Текущее задание:")
-            .AppendLine(BuildTaskSnapshot(task))
-            .AppendLine($"Ответ пользователя: {DescribeSubmittedAnswer(task, answer)}")
-            .AppendLine($"Правильный ответ: {DescribeCorrectAnswer(task)}")
-            .ToString();
+        var body = new ExplainAnswerRequestDto(
+            Game: ToFullGameDto(game),
+            TaskId: task.Id,
+            Answer: new AnswerDto(
+                SelectedOptionId: answer.SelectedOptionId,
+                TextAnswer: answer.TextAnswer,
+                SubmittedOrder: answer.SubmittedOrder
+            )
+        );
 
-        return (await AskOllama(prompt, cancellationToken)).Trim();
+        var response = await PostAsync<ExplainAnswerRequestDto, ExplainAnswerResponseDto>(
+            "/v1/explain-answer", body, cancellationToken);
+        return response.Explanation ?? string.Empty;
     }
 
-    private async Task<string> AskOllama(string prompt, CancellationToken cancellationToken)
+    private static FullGameDto ToFullGameDto(Game game) => new(
+        Title: game.Title,
+        Description: game.Description,
+        Tasks: game.Tasks
+            .OrderBy(t => t.Order)
+            .Select(t => new FullTaskDto(
+                Id: t.Id,
+                Order: t.Order,
+                Type: (int)t.Type,
+                Text: t.Text,
+                CorrectOptionId: t.CorrectOptionId,
+                OpenEndedAcceptedAnswer: t.OpenEndedAcceptedAnswer,
+                Options: t.Options
+                    .OrderBy(o => o.SortOrder)
+                    .Select(o => new FullOptionDto(o.Id, o.Text, o.IsActive, o.SortOrder, o.IsCorrect))
+                    .ToList()
+            ))
+            .ToList()
+    );
+
+    private async Task<TResp> PostAsync<TReq, TResp>(string path, TReq body, CancellationToken cancellationToken)
     {
-        var model = _cfg["Ai:Model"] ?? _cfg["Moderation:Model"] ?? "llama3.1:8b";
-        var resp = await _http.PostAsJsonAsync("/api/generate", new OllamaGenerateRequest(model, prompt, false), cancellationToken);
-        resp.EnsureSuccessStatusCode();
-        var body = await resp.Content.ReadFromJsonAsync<OllamaGenerateResponse>(cancellationToken: cancellationToken);
-        return body?.Response ?? "";
+        var response = await _http.PostAsJsonAsync(path, body, JsonOptions, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        var parsed = await response.Content.ReadFromJsonAsync<TResp>(JsonOptions, cancellationToken);
+        return parsed ?? throw new InvalidOperationException($"Empty response from ai-assistant-service at {path}.");
     }
 
-    private static async Task<T?> ParseWithRetries<T>(Func<Task<string>> ask, Func<string, T?> parse, Func<T?, bool> valid)
-    {
-        for (var attempt = 0; attempt < 2; attempt++)
-        {
-            var raw = await ask();
-            var json = ExtractJson(raw);
-            try
-            {
-                var result = parse(json);
-                if (valid(result)) return result;
-            }
-            catch (JsonException)
-            {
-                // Retry once with a fresh Ollama answer.
-            }
-        }
+    // ---- Wire DTOs ----
+    private record RewriteRequestDto(
+        [property: JsonPropertyName("field")] string Field,
+        [property: JsonPropertyName("mode")] string Mode,
+        [property: JsonPropertyName("text")] string Text);
 
-        return default;
-    }
+    private record RewriteResponseDto([property: JsonPropertyName("text")] string? Text);
 
-    private static string ExtractJson(string raw)
-    {
-        var trimmed = raw.Trim();
-        var start = trimmed.IndexOf('{');
-        var end = trimmed.LastIndexOf('}');
-        return start >= 0 && end > start ? trimmed[start..(end + 1)] : trimmed;
-    }
+    private record GameSnapshotDto(
+        [property: JsonPropertyName("title")] string Title,
+        [property: JsonPropertyName("description")] string? Description);
 
-    private static bool IsValidTaskSuggestion(AiSuggestTaskResponse? suggestion)
-    {
-        if (suggestion is null) return false;
-        if (string.IsNullOrWhiteSpace(suggestion.Text)) return false;
-        if (suggestion.Points < 0 || suggestion.TimeLimitMs <= 0) return false;
-        if (!Enum.IsDefined(typeof(GameTaskType), suggestion.Type)) return false;
-        if (suggestion.Type is GameTaskType.OpenEnded) return true;
-        if (suggestion.Options.Count < 2) return false;
-        if (suggestion.Type is GameTaskType.Quiz or GameTaskType.TrueFalse or GameTaskType.Multichoice)
-            return suggestion.CorrectOptionIndexes.Count > 0;
-        return true;
-    }
+    private record TaskSnapshotDto(
+        [property: JsonPropertyName("text")] string Text,
+        [property: JsonPropertyName("type")] int Type,
+        [property: JsonPropertyName("options")] List<string> Options);
 
-    private static string NormalizeRewriteMode(string mode) => mode switch
-    {
-        "professional" => "сделать профессиональнее",
-        "simple" => "упростить",
-        "hard" => "усложнить",
-        _ => mode
-    };
+    private record SuggestOptionRequestDto(
+        [property: JsonPropertyName("game")] GameSnapshotDto Game,
+        [property: JsonPropertyName("task")] TaskSnapshotDto Task);
 
-    private static string BuildGameSnapshot(Game game) =>
-        string.Join("\n", game.Tasks.OrderBy(t => t.Order).Select(BuildTaskSnapshot));
+    private record SuggestOptionResponseDto([property: JsonPropertyName("text")] string? Text);
 
-    private static string BuildTaskSnapshot(GameTask task)
-    {
-        var options = task.Options
-            .Where(o => o.IsActive)
-            .OrderBy(o => o.SortOrder)
-            .Select(o => $"- {o.Text}{(IsCorrectOption(task, o) ? " (правильный)" : "")}");
+    private record TaskSummaryDto(
+        [property: JsonPropertyName("type")] int Type,
+        [property: JsonPropertyName("text")] string Text);
 
-        return new StringBuilder()
-            .AppendLine($"{task.Order + 1}. Тип: {task.Type}. Текст: {task.Text}")
-            .AppendLine($"Варианты:\n{string.Join("\n", options)}")
-            .ToString()
-            .Trim();
-    }
+    private record SuggestTaskRequestDto(
+        [property: JsonPropertyName("game")] GameSnapshotDto Game,
+        [property: JsonPropertyName("tasks")] List<TaskSummaryDto> Tasks);
 
-    private static string DescribeSubmittedAnswer(GameTask task, GameTaskAnswer answer)
-    {
-        var optionMap = task.Options.ToDictionary(o => o.Id, o => o.Text);
+    private record SuggestTaskResponseDto(
+        [property: JsonPropertyName("type")] int Type,
+        [property: JsonPropertyName("text")] string? Text,
+        [property: JsonPropertyName("points")] int Points,
+        [property: JsonPropertyName("timeLimitMs")] int TimeLimitMs,
+        [property: JsonPropertyName("options")] List<string>? Options,
+        [property: JsonPropertyName("correctOptionIndexes")] List<int>? CorrectOptionIndexes);
 
-        if (answer.SelectedOptionId.HasValue && optionMap.TryGetValue(answer.SelectedOptionId.Value, out var selected))
-            return selected;
+    private record FullOptionDto(
+        [property: JsonPropertyName("id")] Guid Id,
+        [property: JsonPropertyName("text")] string Text,
+        [property: JsonPropertyName("isActive")] bool IsActive,
+        [property: JsonPropertyName("sortOrder")] int SortOrder,
+        [property: JsonPropertyName("isCorrect")] bool IsCorrect);
 
-        if (!string.IsNullOrWhiteSpace(answer.TextAnswer))
-            return answer.TextAnswer;
+    private record FullTaskDto(
+        [property: JsonPropertyName("id")] Guid Id,
+        [property: JsonPropertyName("order")] int Order,
+        [property: JsonPropertyName("type")] int Type,
+        [property: JsonPropertyName("text")] string Text,
+        [property: JsonPropertyName("correctOptionId")] Guid? CorrectOptionId,
+        [property: JsonPropertyName("openEndedAcceptedAnswer")] string? OpenEndedAcceptedAnswer,
+        [property: JsonPropertyName("options")] List<FullOptionDto> Options);
 
-        var ordered = ParseGuidList(answer.SubmittedOrder);
-        if (ordered.Count > 0)
-            return string.Join(" -> ", ordered.Select(id => optionMap.TryGetValue(id, out var text) ? text : id.ToString()));
+    private record FullGameDto(
+        [property: JsonPropertyName("title")] string Title,
+        [property: JsonPropertyName("description")] string? Description,
+        [property: JsonPropertyName("tasks")] List<FullTaskDto> Tasks);
 
-        return "не указан";
-    }
+    private record AnswerDto(
+        [property: JsonPropertyName("selectedOptionId")] Guid? SelectedOptionId,
+        [property: JsonPropertyName("textAnswer")] string? TextAnswer,
+        [property: JsonPropertyName("submittedOrder")] string? SubmittedOrder);
 
-    private static string DescribeCorrectAnswer(GameTask task)
-    {
-        var correctOptions = task.Options.Where(o => o.IsActive && IsCorrectOption(task, o));
-        var correct = (task.Type == GameTaskType.Puzzle
-                ? correctOptions.OrderBy(o => o.SortOrder)
-                : correctOptions.OrderBy(o => o.Text))
-            .Select(o => o.Text)
-            .ToList();
+    private record ExplainAnswerRequestDto(
+        [property: JsonPropertyName("game")] FullGameDto Game,
+        [property: JsonPropertyName("taskId")] Guid TaskId,
+        [property: JsonPropertyName("answer")] AnswerDto Answer);
 
-        if (task.Type == GameTaskType.Puzzle && correct.Count > 0)
-            return string.Join(" -> ", correct);
-
-        if (correct.Count > 0)
-            return string.Join(", ", correct);
-
-        if (!string.IsNullOrWhiteSpace(task.OpenEndedAcceptedAnswer))
-            return task.OpenEndedAcceptedAnswer;
-
-        return task.Type == GameTaskType.Poll ? "у опроса нет правильного ответа" : "не задан";
-    }
-
-    private static bool IsCorrectOption(GameTask task, AnswerOption option) =>
-        task.Type switch
-        {
-            GameTaskType.Quiz or GameTaskType.TrueFalse => option.Id == task.CorrectOptionId,
-            GameTaskType.Multichoice => option.IsCorrect,
-            GameTaskType.Puzzle => true,
-            _ => false
-        };
-
-    private static List<Guid> ParseGuidList(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json)) return new List<Guid>();
-        try
-        {
-            return JsonSerializer.Deserialize<List<Guid>>(json) ?? new List<Guid>();
-        }
-        catch (JsonException)
-        {
-            return new List<Guid>();
-        }
-    }
-
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-
-    private record OllamaGenerateRequest(string Model, string Prompt, bool Stream);
-    private record OllamaGenerateResponse([property: JsonPropertyName("response")] string Response);
+    private record ExplainAnswerResponseDto([property: JsonPropertyName("explanation")] string? Explanation);
 }
 
+/// <summary>
+/// Offline fallback used in E2E tests and CI when the Python microservice is unavailable.
+/// Kept identical to the previous behaviour to keep existing tests green.
+/// </summary>
 public class DeterministicAiAssistantService : IAiAssistantService
 {
     public Task<string> RewriteAsync(string field, string mode, string text, CancellationToken cancellationToken)

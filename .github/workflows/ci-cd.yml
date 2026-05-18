@@ -3,6 +3,8 @@ name: Backend CI/CD
 on:
   push:
     branches: [main, master]
+  pull_request:
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
@@ -10,11 +12,13 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/kusafe-2025/backend
+  BACKEND_IMAGE: ghcr.io/kusafe-2025/backend
+  AI_ASSISTANT_IMAGE: ghcr.io/kusafe-2025/ai-assistant-service
+  GAME_MODERATION_IMAGE: ghcr.io/kusafe-2025/game-moderation-service
   DEPLOY_DIR: /opt/kusafe
 
 jobs:
-  test:
+  test-backend:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -36,10 +40,50 @@ jobs:
       - name: Test
         run: dotnet test Tests/KuSaFeBackend.Tests/KuSaFeBackend.Tests.csproj --configuration Release --no-build
 
-  build-and-deploy:
-    needs: test
+  test-ai-assistant-service:
     runs-on: ubuntu-22.04
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    defaults:
+      run:
+        working-directory: ai-assistant-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: ai-assistant-service/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        run: PYTHONPATH=. python -m pytest -q
+
+  test-game-moderation-service:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: game-moderation-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: game-moderation-service/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        run: PYTHONPATH=. python -m pytest -q
+
+  build-and-deploy:
+    needs: [test-backend, test-ai-assistant-service, test-game-moderation-service]
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     steps:
       - uses: actions/checkout@v4
 
@@ -54,12 +98,33 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile
           push: true
           tags: |
-            ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
-            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.BACKEND_IMAGE }}:${{ github.ref_name }}
+            ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
 
-      - name: Deploy backend over SSH with retries
+      - name: Build and push ai-assistant-service image
+        uses: docker/build-push-action@v6
+        with:
+          context: ai-assistant-service
+          file: ai-assistant-service/Dockerfile
+          push: true
+          tags: |
+            ${{ env.AI_ASSISTANT_IMAGE }}:${{ github.ref_name }}
+            ${{ env.AI_ASSISTANT_IMAGE }}:${{ github.sha }}
+
+      - name: Build and push game-moderation-service image
+        uses: docker/build-push-action@v6
+        with:
+          context: game-moderation-service
+          file: game-moderation-service/Dockerfile
+          push: true
+          tags: |
+            ${{ env.GAME_MODERATION_IMAGE }}:${{ github.ref_name }}
+            ${{ env.GAME_MODERATION_IMAGE }}:${{ github.sha }}
+
+      - name: Deploy over SSH with retries
         shell: bash
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -89,7 +154,7 @@ jobs:
 
           compose_b64=$(base64 -w0 deploy/docker-compose.prod.yml)
           remote_prefix=$(
-            printf 'DEPLOY_DIR=%q POSTGRES_PASSWORD=%q JWT_KEY=%q GHCR_READ_USER=%q GHCR_READ_TOKEN=%q BACKEND_TAG=%q FRONTEND_TAG=%q COMPOSE_B64=%q bash -se' \
+            printf 'DEPLOY_DIR=%q POSTGRES_PASSWORD=%q JWT_KEY=%q GHCR_READ_USER=%q GHCR_READ_TOKEN=%q BACKEND_TAG=%q FRONTEND_TAG=%q AI_ASSISTANT_TAG=%q GAME_MODERATION_TAG=%q COMPOSE_B64=%q bash -se' \
               '${{ env.DEPLOY_DIR }}' \
               "$PROD_POSTGRES_PASSWORD" \
               "$PROD_JWT_KEY" \
@@ -97,11 +162,13 @@ jobs:
               "$GHCR_READ_TOKEN" \
               '${{ github.ref_name }}' \
               '${{ github.ref_name }}' \
+              '${{ github.ref_name }}' \
+              '${{ github.ref_name }}' \
               "$compose_b64"
           )
 
           for attempt in $(seq 1 5); do
-            echo "Deploying backend (${attempt}/5)."
+            echo "Deploying (${attempt}/5)."
             if ssh "${ssh_opts[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "$remote_prefix" <<'REMOTE_SCRIPT'
               set -euo pipefail
 
@@ -117,19 +184,28 @@ jobs:
                   "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}" \
                   "JWT_KEY=${JWT_KEY}" \
                   'OLLAMA_MODEL=llama3.1:8b' \
+                  'MODERATION_VOTES=5' \
                   "BACKEND_TAG=${BACKEND_TAG}" \
-                  "FRONTEND_TAG=${FRONTEND_TAG}" > .env
+                  "FRONTEND_TAG=${FRONTEND_TAG}" \
+                  "AI_ASSISTANT_TAG=${AI_ASSISTANT_TAG}" \
+                  "GAME_MODERATION_TAG=${GAME_MODERATION_TAG}" > .env
               fi
 
-              if grep -q '^BACKEND_TAG=' .env; then
-                sed -i "s/^BACKEND_TAG=.*/BACKEND_TAG=${BACKEND_TAG}/" .env
-              else
-                printf '%s\n' "BACKEND_TAG=${BACKEND_TAG}" >> .env
-              fi
+              # Always refresh the four image tags so the deploy picks up new builds.
+              for var in BACKEND_TAG FRONTEND_TAG AI_ASSISTANT_TAG GAME_MODERATION_TAG; do
+                val="${!var}"
+                if grep -q "^${var}=" .env; then
+                  sed -i "s/^${var}=.*/${var}=${val}/" .env
+                else
+                  printf '%s\n' "${var}=${val}" >> .env
+                fi
+              done
 
               printf '%s\n' "$GHCR_READ_TOKEN" | docker login ghcr.io -u "$GHCR_READ_USER" --password-stdin
-              docker compose -f docker-compose.prod.yml pull backend
-              docker compose -f docker-compose.prod.yml up -d postgres ollama backend
+              docker compose -f docker-compose.prod.yml pull \
+                backend ai-assistant-service game-moderation-service
+              docker compose -f docker-compose.prod.yml up -d \
+                postgres ollama ai-assistant-service game-moderation-service backend
               docker image prune -f
 
               for health_attempt in $(seq 1 60); do
@@ -146,17 +222,19 @@ jobs:
               echo "Backend did not become healthy in time."
               docker compose -f docker-compose.prod.yml ps
               docker logs --tail=200 kusafe-backend || true
+              docker logs --tail=100 kusafe-ai-assistant || true
+              docker logs --tail=100 kusafe-game-moderation || true
               exit 1
           REMOTE_SCRIPT
             then
-              echo "Backend deploy succeeded."
+              echo "Deploy succeeded."
               exit 0
             fi
 
             sleep_seconds=$((attempt * 5))
-            echo "Backend deploy attempt failed; retrying in ${sleep_seconds}s."
+            echo "Deploy attempt failed; retrying in ${sleep_seconds}s."
             sleep "$sleep_seconds"
           done
 
-          echo "Backend deploy failed after 5 attempts."
+          echo "Deploy failed after 5 attempts."
           exit 1

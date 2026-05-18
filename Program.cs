@@ -34,33 +34,38 @@ namespace KuSaFeBackend
             // Add services to the container.
 
             builder.Services.AddControllers();
+
+            // Game moderation: delegates to the Python `game-moderation-service` microservice.
+            // The Deterministic provider stays around for E2E tests / CI without Ollama.
             if (string.Equals(builder.Configuration["Moderation:Provider"], "Deterministic", StringComparison.OrdinalIgnoreCase))
             {
                 builder.Services.AddSingleton<IGameModerationService, DeterministicGameModerationService>();
             }
             else
             {
-                builder.Services.AddHttpClient<IGameModerationService, OllamaGameModerationService>(client =>
+                builder.Services.AddHttpClient<IGameModerationService, RemoteGameModerationService>(client =>
                 {
-                    var baseUrl = builder.Configuration["Moderation:OllamaBaseUrl"] ?? "http://localhost:11434";
+                    var baseUrl = builder.Configuration["Moderation:BaseUrl"]
+                        ?? "http://game-moderation-service:8000";
                     client.BaseAddress = new Uri(baseUrl);
-                    client.Timeout = TimeSpan.FromSeconds(60);
+                    // Moderation runs N votes in series against an LLM — needs a generous budget.
+                    client.Timeout = TimeSpan.FromSeconds(120);
                 });
             }
 
+            // AI assistant: delegates to the Python `ai-assistant-service` microservice.
             if (string.Equals(builder.Configuration["Ai:Provider"], "Deterministic", StringComparison.OrdinalIgnoreCase))
             {
                 builder.Services.AddSingleton<IAiAssistantService, DeterministicAiAssistantService>();
             }
             else
             {
-                builder.Services.AddHttpClient<IAiAssistantService, OllamaAiAssistantService>(client =>
+                builder.Services.AddHttpClient<IAiAssistantService, RemoteAiAssistantService>(client =>
                 {
-                    var baseUrl = builder.Configuration["Ai:OllamaBaseUrl"]
-                        ?? builder.Configuration["Moderation:OllamaBaseUrl"]
-                        ?? "http://localhost:11434";
+                    var baseUrl = builder.Configuration["Ai:BaseUrl"]
+                        ?? "http://ai-assistant-service:8000";
                     client.BaseAddress = new Uri(baseUrl);
-                    client.Timeout = TimeSpan.FromSeconds(90);
+                    client.Timeout = TimeSpan.FromSeconds(120);
                 });
             }
 
